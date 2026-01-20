@@ -10,6 +10,7 @@ export default function Home() {
   const [scopeChange, setScopeChange] = useState("")
   const [markup, setMarkup] = useState(20)
   const [output, setOutput] = useState("")
+  const [logoDataUrl, setLogoDataUrl] = useState<string | null>(null)
 
   async function generateChangeOrder() {
     setOutput("Generating change order...")
@@ -37,10 +38,25 @@ export default function Home() {
     const pageWidth = doc.internal.pageSize.getWidth()
     let y = 20
 
-    // Company name
-    doc.setFontSize(14)
-    doc.text(companyName || "Company Name", pageWidth / 2, y, { align: "center" })
-    y += 10
+  // Logo or company name
+if (logoDataUrl) {
+  const logoWidth = 40
+  const logoHeight = 20
+
+  doc.addImage(
+    logoDataUrl,
+    "PNG",
+    (pageWidth - logoWidth) / 2,
+    y,
+    logoWidth,
+    logoHeight
+  )
+  y += logoHeight + 10
+} else {
+  doc.setFontSize(14)
+  doc.text(companyName || "Company Name", pageWidth / 2, y, { align: "center" })
+  y += 10
+}
 
     // Title
     doc.setFontSize(18)
@@ -93,6 +109,27 @@ export default function Home() {
   return (
     <div style={{ maxWidth: 600, margin: "40px auto", fontFamily: "Arial, sans-serif" }}>
       <h1>Create Change Order</h1>
+      <label>
+  Company Logo
+  <br />
+  <input
+    type="file"
+    accept="image/png, image/jpeg"
+    onChange={(e) => {
+      const file = e.target.files?.[0]
+      if (!file) return
+
+      const reader = new FileReader()
+      reader.onload = () => {
+        setLogoDataUrl(reader.result as string)
+      }
+      reader.readAsDataURL(file)
+    }}
+    style={{ marginTop: 6 }}
+  />
+</label>
+
+<br /><br />
 
       <label>
         Company Name
