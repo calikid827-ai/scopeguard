@@ -28,19 +28,63 @@ export default function Home() {
   }
 
   function downloadPDF() {
-    if (!output) return
+  if (!output) return
 
-    const doc = new jsPDF()
+  const doc = new jsPDF()
+  const pageWidth = doc.internal.pageSize.getWidth()
+  let y = 20
 
-    doc.setFontSize(16)
-    doc.text("CHANGE ORDER", 105, 20, { align: "center" })
+  // Company Name
+  doc.setFontSize(14)
+  doc.text("Your Company Name", pageWidth / 2, y, { align: "center" })
+  y += 10
 
-    doc.setFontSize(11)
-    const lines = doc.splitTextToSize(output, 170)
-    doc.text(lines, 20, 35)
+  // Title
+  doc.setFontSize(18)
+  doc.text("CHANGE ORDER", pageWidth / 2, y, { align: "center" })
+  y += 12
 
-    doc.save("change-order.pdf")
-  }
+  // Date
+  doc.setFontSize(10)
+  const date = new Date().toLocaleDateString()
+  doc.text(`Date: ${date}`, 20, y)
+  y += 10
+
+  // Divider
+  doc.line(20, y, pageWidth - 20, y)
+  y += 10
+
+  // Section Header
+  doc.setFontSize(12)
+  doc.text("Scope of Change", 20, y)
+  y += 6
+
+  // Body Text
+  doc.setFontSize(11)
+  const lines = doc.splitTextToSize(output, pageWidth - 40)
+  doc.text(lines, 20, y)
+  y += lines.length * 6 + 10
+
+  // Divider
+  doc.line(20, y, pageWidth - 20, y)
+  y += 15
+
+  // Signatures
+  doc.setFontSize(11)
+  doc.text("Approved By:", 20, y)
+  doc.line(20, y + 6, 100, y + 6)
+  doc.text("Date:", 110, y)
+  doc.line(120, y + 6, pageWidth - 20, y + 6)
+
+  y += 20
+
+  doc.text("Contractor Signature:", 20, y)
+  doc.line(20, y + 6, 100, y + 6)
+  doc.text("Date:", 110, y)
+  doc.line(120, y + 6, pageWidth - 20, y + 6)
+
+  doc.save("change-order.pdf")
+}
 
   return (
     <div style={{ maxWidth: 600, margin: "40px auto", fontFamily: "Arial, sans-serif" }}>
