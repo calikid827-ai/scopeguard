@@ -1,12 +1,9 @@
 export default function SuccessPage() {
   return (
-    <div style={{ maxWidth: 600, margin: "60px auto", textAlign: "center" }}>
-      <h1>✅ Payment Successful</h1>
-      <p>You’ve unlocked full access to ScopeGuard.</p>
-
-      <a href="/" style={{ display: "inline-block", marginTop: 20 }}>
-        ← Back to ScopeGuard
-      </a>
+    <div style={{ padding: 40, fontFamily: "Arial, sans-serif" }}>
+      <h1>Payment Successful ✅</h1>
+      <p>Thank you for upgrading ScopeGuard.</p>
+      <a href="/">Return to app</a>
     </div>
   )
 }
