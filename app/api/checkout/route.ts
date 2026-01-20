@@ -5,6 +5,8 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string)
 
 export async function POST() {
   try {
+    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL as string
+
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       line_items: [
@@ -13,8 +15,8 @@ export async function POST() {
           quantity: 1,
         },
       ],
-      success_url: "http://localhost:3000?paid=true",
-      cancel_url: "http://localhost:3000",
+      success_url: `${baseUrl}/success`,
+      cancel_url: `${baseUrl}/cancel`,
     })
 
     return NextResponse.json({ url: session.url })
