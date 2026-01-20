@@ -11,39 +11,41 @@ export async function POST(req: Request) {
   const prompt = `
 You are a professional residential construction project manager.
 
-Write a clear, client-facing CHANGE ORDER based on the information below.
+Generate a clear, client-facing CHANGE ORDER using the rules below.
 
-Rules:
-- Use professional but simple language
-- Be clear and neutral (not salesy)
-- Do NOT include emojis
+IMPORTANT RULES:
+- Use professional, simple language
+- Be neutral and factual
 - Do NOT mention AI
 - Do NOT include disclaimers
-- Assume this will be attached to a contract
+- Assume this document will be signed by a client
+- Use USD currency
+- Ensure all math is internally consistent
+- If exact costs are unknown, use reasonable placeholder estimates
 
-Structure the response EXACTLY like this:
+FORMAT THE RESPONSE EXACTLY AS FOLLOWS:
 
 CHANGE ORDER SUMMARY
-Brief 2–3 sentence explanation of why this change is required.
+2–3 sentences explaining why this change is required.
 
 SCOPE OF CHANGE
-- Bullet list of the specific work being added, removed, or modified.
+- Bullet list of specific work being added, removed, or modified.
 
 COST BREAKDOWN
-- Labor:
-- Materials:
-- Subcontractors (if applicable):
-- Subtotal:
-- Markup (${markup}%):
-- Total Change Order Amount:
+- Labor: $____
+- Materials: $____
+- Subcontractors (if applicable): $____
+- Subtotal: $____
+- Markup (${markup}%): $____
+- Total Change Order Amount: $____
 
 SCHEDULE IMPACT
-One sentence explaining any impact to the project timeline, or state "No change to project schedule."
+State any impact to the project timeline. If none, state "No change to project schedule."
 
 APPROVAL
 By approving this change order, the client authorizes the contractor to proceed with the work described above and agrees to the revised cost and schedule.
 
-Project Change Description:
+PROJECT CHANGE DESCRIPTION:
 ${scopeChange}
 `
 
