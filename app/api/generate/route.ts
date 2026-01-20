@@ -1,15 +1,20 @@
-export const dynamic = "force-dynamic"
-
 import { NextResponse } from "next/server"
 import OpenAI from "openai"
+
+export const runtime = "nodejs"
+export const dynamic = "force-dynamic"
 
 export async function POST(req: Request) {
   try {
     const { scopeChange, subtotal, markup, total, paymentTerms, dueDate } =
       await req.json()
 
+    if (!process.env.OPENAI_API_KEY) {
+      throw new Error("Missing OPENAI_API_KEY")
+    }
+
     const openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY!,
+      apiKey: process.env.OPENAI_API_KEY,
     })
 
     const prompt = `
