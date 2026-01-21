@@ -423,6 +423,12 @@ async function generate() {
   {loading ? "Generating…" : "Generate Change Order / Estimate"}
 </button>
 
+{loading && (
+  <p style={{ fontSize: 13, color: "#666", marginTop: 8 }}>
+    Generating professional document…
+  </p>
+)}
+
 {result && (
   <div
     style={{

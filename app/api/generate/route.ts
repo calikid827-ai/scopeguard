@@ -52,9 +52,26 @@ function clampPricing(pricing: Pricing): Pricing {
     labor: Math.max(0, pricing.labor),
     materials: Math.max(0, pricing.materials),
     subs: Math.max(0, pricing.subs),
-    markup: Math.min(40, Math.max(10, pricing.markup)),
+    markup: Math.min(25, Math.max(15, pricing.markup)),
     total: Math.min(MAX_TOTAL, Math.max(0, pricing.total)),
   }
+}
+
+// 🔍 Simple, reliable trade auto-detection
+function autoDetectTrade(scope: string): string {
+  const s = scope.toLowerCase()
+
+  if (/(paint|painting|prime|primer|drywall patch|patch drywall)/.test(s))
+    return "painting"
+  if (/(floor|flooring|tile|grout)/.test(s)) return "flooring"
+  if (/(electrical|outlet|switch|panel|lighting)/.test(s))
+    return "electrical"
+  if (/(plumb|toilet|sink|faucet|shower|water line)/.test(s))
+    return "plumbing"
+  if (/(carpentry|trim|baseboard|framing|cabinet)/.test(s))
+    return "carpentry"
+
+  return "general renovation"
 }
 
 // -----------------------------
@@ -65,10 +82,7 @@ export async function POST(req: Request) {
     const body = await req.json()
 
     const scopeChange = body.scopeChange
-    const trade =
-      typeof body.trade === "string" && body.trade.trim()
-        ? body.trade
-        : "general renovation"
+    const uiTrade = typeof body.trade === "string" ? body.trade.trim() : ""
     const state =
       typeof body.state === "string" && body.state.trim()
         ? body.state
@@ -80,6 +94,9 @@ export async function POST(req: Request) {
         { status: 400 }
       )
     }
+
+    // ✅ Use auto-detect ONLY if user did not select a trade
+    const trade = uiTrade || autoDetectTrade(scopeChange)
 
     // -----------------------------
     // AI PROMPT (STRICT JSON ONLY)
@@ -109,7 +126,7 @@ DOCUMENT RULES (CRITICAL):
 - Be detailed and specific about the scope of work
 - Describe labor activities, materials, and intent clearly
 - Do NOT include disclaimers or markdown
-- Write 3–5 professional sentences describing the scope in detail, including preparation, execution, and completion intent where relevant
+- Write 3–5 professional sentences describing the scope in detail
 
 PRICING RULES:
 - Use realistic 2024–2025 U.S. contractor pricing
@@ -117,15 +134,6 @@ PRICING RULES:
 - Mid-market residential work
 - Totals only (no line items)
 - Round to whole dollars
-
-TRADE PRICING GUIDANCE:
-- Painting → labor-heavy, low materials
-- Flooring → materials + install labor
-- Electrical → high labor rate
-- Plumbing → skilled labor + fixtures
-- Tile → labor-intensive with waste
-- Carpentry → balanced
-- General renovation → balanced
 
 MARKUP RULE:
 - Suggest a markup between 15–25%
@@ -153,29 +161,19 @@ Return ONLY valid JSON.
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.25,
-      response_format: { type: "json_object" }, // 🔒 HARD JSON ENFORCEMENT
+      response_format: { type: "json_object" },
       messages: [{ role: "user", content: prompt }],
     })
 
     const raw = completion.choices[0]?.message?.content
     if (!raw) throw new Error("Empty AI response")
 
-    let parsed: AIResponse
-    try {
-      parsed = JSON.parse(raw)
-    } catch (err) {
-      console.error("Invalid JSON from AI:", raw)
-      return NextResponse.json(
-        { error: "AI returned invalid JSON", raw },
-        { status: 500 }
-      )
-    }
+    const parsed: AIResponse = JSON.parse(raw)
 
     if (
       typeof parsed.description !== "string" ||
       !isValidPricing(parsed.pricing)
     ) {
-      console.error("AI schema validation failed:", parsed)
       return NextResponse.json(
         { error: "AI response schema invalid", parsed },
         { status: 500 }
@@ -184,9 +182,6 @@ Return ONLY valid JSON.
 
     const safePricing = clampPricing(parsed.pricing)
 
-    // -----------------------------
-    // FINAL RESPONSE (UI-READY)
-    // -----------------------------
     return NextResponse.json({
       documentType: parsed.documentType,
       trade: parsed.trade || trade,
