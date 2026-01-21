@@ -333,6 +333,22 @@ if (data.trade) setTrade(data.trade)
           ? "Generating…"
           : "Generate Professional Change Order"}
       </button>
+      {result && (
+  <div
+    style={{
+      marginTop: 24,
+      padding: 16,
+      background: "#f5f5f5",
+      borderRadius: 8,
+      whiteSpace: "pre-wrap",
+      lineHeight: 1.6,
+      fontSize: 15,
+    }}
+  >
+    <h3 style={{ marginBottom: 8 }}>Generated Change Order</h3>
+    {result}
+  </div>
+)}
       {trade && (
   <p
     style={{
