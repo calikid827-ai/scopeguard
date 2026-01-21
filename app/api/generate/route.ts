@@ -106,7 +106,10 @@ DOCUMENT RULES (CRITICAL):
 - If unclear → "Change Order / Estimate"
 - The opening sentence MUST explicitly state the document type
 - Use professional, contract-ready language
-- Do NOT include disclaimers, explanations, or markdown
+- Be detailed and specific about the scope of work
+- Describe labor activities, materials, and intent clearly
+- Do NOT include disclaimers or markdown
+- Write 2–4 full sentences describing the scope in detail
 
 PRICING RULES:
 - Use realistic 2024–2025 U.S. contractor pricing
