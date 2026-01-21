@@ -100,7 +100,6 @@ export default function Home() {
       body: JSON.stringify({
   scopeChange,
   trade,
-  state,
 }),
     })
 
@@ -313,6 +312,25 @@ if (data.trade) setTrade(data.trade)
           marginTop: 8,
         }}
       />
+      <select
+  value={trade}
+  onChange={(e) => setTrade(e.target.value)}
+  style={{
+    width: "100%",
+    marginTop: 8,
+    padding: 8,
+    borderRadius: 6,
+    border: "1px solid #ccc",
+  }}
+>
+  <option value="">Auto-detect trade (recommended)</option>
+  <option value="painting">Painting</option>
+  <option value="flooring">Flooring</option>
+  <option value="electrical">Electrical</option>
+  <option value="plumbing">Plumbing</option>
+  <option value="tile">Tile</option>
+  <option value="general renovation">General Renovation</option>
+</select>
 
       <button
         onClick={generate}

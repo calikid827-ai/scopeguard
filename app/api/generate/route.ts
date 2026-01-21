@@ -1,51 +1,102 @@
 import { NextResponse } from "next/server"
 import OpenAI from "openai"
 
+export const dynamic = "force-dynamic"
+
+// -----------------------------
+// ENV VALIDATION (HARD FAIL)
+// -----------------------------
+if (!process.env.OPENAI_API_KEY) {
+  throw new Error("OPENAI_API_KEY is missing")
+}
+
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
+  apiKey: process.env.OPENAI_API_KEY,
 })
 
+// -----------------------------
+// TYPES (SOURCE OF TRUTH)
+// -----------------------------
+type Pricing = {
+  labor: number
+  materials: number
+  subcontractors: number
+  markupPercent: number
+  total: number
+}
+
+type AIResponse = {
+  trade: string
+  description: string
+  pricing: Pricing
+}
+
+// -----------------------------
+// HELPERS
+// -----------------------------
+function isValidPricing(p: any): p is Pricing {
+  return (
+    typeof p?.labor === "number" &&
+    typeof p?.materials === "number" &&
+    typeof p?.subcontractors === "number" &&
+    typeof p?.markupPercent === "number" &&
+    typeof p?.total === "number"
+  )
+}
+
+function clampPricing(pricing: Pricing): Pricing {
+  const MAX_TOTAL = 250_000
+
+  return {
+    labor: Math.max(0, pricing.labor),
+    materials: Math.max(0, pricing.materials),
+    subcontractors: Math.max(0, pricing.subcontractors),
+    markupPercent: Math.min(40, Math.max(10, pricing.markupPercent)),
+    total: Math.min(MAX_TOTAL, Math.max(0, pricing.total)),
+  }
+}
+
+// -----------------------------
+// API HANDLER
+// -----------------------------
 export async function POST(req: Request) {
   try {
-    const { scopeChange, trade, state } = await req.json()
+    const { scopeChange, trade = "general renovation", state = "US" } =
+      await req.json()
 
-    if (!scopeChange) {
+    if (!scopeChange || typeof scopeChange !== "string") {
       return NextResponse.json(
-        { error: "Missing scope change" },
+        { error: "Missing or invalid scopeChange" },
         { status: 400 }
       )
     }
 
+    // -----------------------------
+    // AI PROMPT (STRICT JSON ONLY)
+    // -----------------------------
     const prompt = `
-You are an expert U.S. construction estimator.
+You are a senior U.S. construction estimator.
 
-Job Location:
-State: ${state || "national average"}
+Trade Type: ${trade}
+Location: ${state}
 
-Trade Type: ${trade || "general renovation"}
+Use realistic U.S. renovation pricing based on trade and location.
 
-Apply realistic labor rates by state:
-
-Labor rate guidance:
-- California / New York / Washington: very high labor costs
-- Texas / Arizona / Florida: moderate labor costs
-- Midwest / Southeast: lower labor costs
-
-Pricing guidance by trade:
+PRICING GUIDANCE:
 - Painting: labor-heavy, low materials
-- Flooring: materials + install labor
-- Electrical: high hourly labor, licensed work
+- Flooring: materials + installation labor
+- Electrical: high labor rate, code compliance
 - Plumbing: skilled labor + fixtures
-- Tile: labor-intensive with waste factor
+- Tile: labor-intensive with material waste
 - General renovation: balanced estimate
 
-Scope of Change:
-${scopeChange}
+RETURN ONLY VALID JSON.
+NO prose. NO markdown. NO explanations.
 
-Return ONLY valid JSON:
-
+JSON SCHEMA:
 {
-  "description": "Professional written change order text",
+  "trade": string,
+  "description": string,
   "pricing": {
     "labor": number,
     "materials": number,
@@ -55,25 +106,30 @@ Return ONLY valid JSON:
   }
 }
 
-Rules:
-- All pricing must reflect the job state
-- Numbers must be realistic USD estimates
-- Do not include currency symbols
-- Do not include any text outside JSON
+SCOPE OF CHANGE:
+${scopeChange}
 `
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
+      temperature: 0.25,
       messages: [{ role: "user", content: prompt }],
-      temperature: 0.3,
     })
 
-    const raw = completion.choices[0].message.content || ""
+    const raw = completion.choices[0]?.message?.content
 
-    let parsed
+    if (!raw) {
+      throw new Error("Empty AI response")
+    }
+
+    // -----------------------------
+    // PARSE & VALIDATE JSON
+    // -----------------------------
+    let parsed: AIResponse
+
     try {
       parsed = JSON.parse(raw)
-    } catch {
+    } catch (err) {
       console.error("AI returned invalid JSON:", raw)
       return NextResponse.json(
         { error: "AI returned invalid JSON", raw },
@@ -81,18 +137,29 @@ Rules:
       )
     }
 
+    if (
+      typeof parsed.description !== "string" ||
+      !isValidPricing(parsed.pricing)
+    ) {
+      console.error("AI schema validation failed:", parsed)
+      return NextResponse.json(
+        { error: "AI response schema invalid", parsed },
+        { status: 500 }
+      )
+    }
+
+    // -----------------------------
+    // SAFETY CLAMPS
+    // -----------------------------
+    const safePricing = clampPricing(parsed.pricing)
+
     return NextResponse.json({
-      text: parsed.description,
-      pricing: {
-        labor: parsed.pricing.labor,
-        materials: parsed.pricing.materials,
-        subs: parsed.pricing.subcontractors,
-        markup: parsed.pricing.markupPercent,
-        total: parsed.pricing.total,
-      },
+      trade: parsed.trade || trade,
+      description: parsed.description,
+      pricing: safePricing,
     })
-  } catch (err) {
-    console.error("AI generate error:", err)
+  } catch (error) {
+    console.error("AI generation failed:", error)
     return NextResponse.json(
       { error: "AI generation failed" },
       { status: 500 }
