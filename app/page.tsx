@@ -138,7 +138,7 @@ export default function Home() {
     }
 
     const data = await res.json()
-    setResult(data.text)
+    setResult(data.text || data.description || "")
     if (data.pricing) setPricing(data.pricing)
     if (!trade && data.trade) setTrade(data.trade)
 
