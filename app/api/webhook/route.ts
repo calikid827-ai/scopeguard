@@ -1,10 +1,19 @@
-import Stripe from "stripe"
 import { NextResponse } from "next/server"
+import Stripe from "stripe"
+import { createClient } from "@supabase/supabase-js"
 
-export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!)
+// Stripe
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+  apiVersion: "2023-10-16",
+})
+
+// Supabase (SERVICE ROLE — backend only)
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+)
 
 export async function POST(req: Request) {
   const sig = req.headers.get("stripe-signature")
@@ -16,12 +25,11 @@ export async function POST(req: Request) {
     )
   }
 
+  const body = await req.text()
+
   let event: Stripe.Event
 
   try {
-    // ⚠️ MUST be raw text
-    const body = await req.text()
-
     event = stripe.webhooks.constructEvent(
       body,
       sig,
@@ -35,14 +43,31 @@ export async function POST(req: Request) {
     )
   }
 
-  // ✅ Handle event
+  // ✅ Handle successful checkout
   if (event.type === "checkout.session.completed") {
     const session = event.data.object as Stripe.Checkout.Session
-    console.log("✅ Payment successful:", session.id)
 
-    // FUTURE:
-    // persist user entitlement in DB
-    // mark account as paid
+    const email = session.customer_details?.email
+    const customerId = session.customer as string
+
+    if (!email || !customerId) {
+      console.error("Missing email or customer ID")
+      return NextResponse.json({ received: true })
+    }
+
+    const { error } = await supabase
+      .from("entitlements")
+      .upsert({
+        email,
+        stripe_customer_id: customerId,
+        active: true,
+      })
+
+    if (error) {
+      console.error("❌ Supabase insert failed:", error)
+    } else {
+      console.log("✅ Entitlement granted for:", email)
+    }
   }
 
   return NextResponse.json({ received: true })
