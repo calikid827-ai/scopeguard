@@ -171,7 +171,7 @@ if (!trade && data.trade) setTrade(data.trade)
 
           <hr/>
 
-          <h2>Change Order</h2>
+          <h2>Change Order / Estimate</h2>
           <p>${result}</p>
 
           <hr/>
@@ -331,8 +331,8 @@ if (!trade && data.trade) setTrade(data.trade)
         }}
       >
         {loading
-          ? "Generating…"
-          : "Generate Professional Change Order"}
+  ? "Generating pricing and scope…"
+  : "Generate Change Order / Estimate"}
       </button>
       {result && (
   <div
@@ -346,7 +346,10 @@ if (!trade && data.trade) setTrade(data.trade)
       fontSize: 15,
     }}
   >
-    <h3 style={{ marginBottom: 8 }}>Generated Change Order</h3>
+    <h3 style={{ marginBottom: 8 }}>Generated Change Order / Estimate</h3>
+    <p style={{ fontSize: 13, color: "#666", marginBottom: 8 }}>
+  This document may be used as an estimate or a change order depending on contract status.
+</p>
     {result}
   </div>
 )}

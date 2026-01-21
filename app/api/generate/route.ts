@@ -87,7 +87,7 @@ export async function POST(req: Request) {
 You are an expert U.S. construction estimator and licensed project manager.
 
 Your task is to:
-1) Write a professional construction CHANGE ORDER description
+1) Write a professional construction Change Order / Estimate description suitable for contractor-client use.
 2) Generate realistic cost estimates appropriate for the trade and job location
 
 INPUTS:
@@ -100,6 +100,12 @@ ${scopeChange}
 ────────────────────────────────────────
 CRITICAL RULES (FOLLOW STRICTLY)
 ────────────────────────────────────────
+DOCUMENT INTENT:
+- The document must be suitable for use as either:
+  • A pre-construction estimate, OR
+  • A post-contract change order
+- Do NOT state whether the document is binding
+- Use neutral professional construction language
 
 TRADE DETECTION:
 - If Trade Type is provided by the user, you MUST use it
