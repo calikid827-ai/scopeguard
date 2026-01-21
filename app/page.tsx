@@ -6,14 +6,13 @@ export default function Home() {
   const FREE_LIMIT = 3
 
   // -------------------------
-  // Company profile
+  // Company profile (persisted)
   // -------------------------
   const [companyProfile, setCompanyProfile] = useState({
     name: "",
     address: "",
     phone: "",
     email: "",
-    logo: "",
   })
 
   useEffect(() => {
@@ -22,7 +21,10 @@ export default function Home() {
   }, [])
 
   useEffect(() => {
-    localStorage.setItem("scopeguard_company", JSON.stringify(companyProfile))
+    localStorage.setItem(
+      "scopeguard_company",
+      JSON.stringify(companyProfile)
+    )
   }, [companyProfile])
 
   // -------------------------
@@ -45,7 +47,10 @@ export default function Home() {
 
   useEffect(() => {
     setCount(Number(localStorage.getItem("changeOrderCount") || "0"))
-    if (localStorage.getItem("scopeguard_paid") === "true") setPaid(true)
+
+    if (localStorage.getItem("scopeguard_paid") === "true") {
+      setPaid(true)
+    }
 
     if (window.location.search.includes("paid=true")) {
       localStorage.setItem("scopeguard_paid", "true")
@@ -58,11 +63,28 @@ export default function Home() {
   const remaining = Math.max(0, FREE_LIMIT - count)
 
   // -------------------------
+  // Auto-calc total
+  // -------------------------
+  useEffect(() => {
+    const base =
+      pricing.labor + pricing.materials + pricing.subs
+    const total = Math.round(
+      base * (1 + pricing.markup / 100)
+    )
+    setPricing((p) => ({ ...p, total }))
+  }, [
+    pricing.labor,
+    pricing.materials,
+    pricing.subs,
+    pricing.markup,
+  ])
+
+  // -------------------------
   // Generate AI change order
   // -------------------------
   async function generate() {
     if (locked) {
-      setStatus("Free limit reached. Please upgrade to continue.")
+      setStatus("Free limit reached. Please upgrade.")
       return
     }
 
@@ -83,7 +105,7 @@ export default function Home() {
     }
 
     const data = await res.json()
-    setResult(data.text)
+    setResult(data.text || "")
     if (data.pricing) setPricing(data.pricing)
 
     setLoading(false)
@@ -91,7 +113,10 @@ export default function Home() {
 
     if (!paid) {
       const newCount = count + 1
-      localStorage.setItem("changeOrderCount", newCount.toString())
+      localStorage.setItem(
+        "changeOrderCount",
+        newCount.toString()
+      )
       setCount(newCount)
     }
   }
@@ -101,7 +126,9 @@ export default function Home() {
   // -------------------------
   async function upgrade() {
     setStatus("Redirecting to secure checkout…")
-    const res = await fetch("/api/checkout", { method: "POST" })
+    const res = await fetch("/api/checkout", {
+      method: "POST",
+    })
     const data = await res.json()
     if (data.url) window.location.href = data.url
     else setStatus("Checkout error.")
@@ -130,7 +157,10 @@ export default function Home() {
         </head>
         <body>
           <h1>${companyProfile.name}</h1>
-          <div class="muted">${companyProfile.address}<br/>${companyProfile.phone} · ${companyProfile.email}</div>
+          <div class="muted">
+            ${companyProfile.address}<br/>
+            ${companyProfile.phone} · ${companyProfile.email}
+          </div>
 
           <hr/>
 
@@ -171,19 +201,25 @@ export default function Home() {
   // -------------------------
   return (
     <main
-  style={{
-    maxWidth: 640,
-    margin: "60px auto",
-    padding: 32,
-    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont",
-    border: "1px solid #e5e7eb",
-    borderRadius: 14,
-    background: "#ffffff",
-    boxShadow: "0 4px 12px rgba(0,0,0,0.05)",
-  }}
->
+      style={{
+        maxWidth: 640,
+        margin: "60px auto",
+        padding: 32,
+        fontFamily:
+          "system-ui, -apple-system, BlinkMacSystemFont",
+        border: "1px solid #e5e7eb",
+        borderRadius: 14,
+        background: "#ffffff",
+        boxShadow: "0 4px 12px rgba(0,0,0,0.05)",
+      }}
+    >
       <h1>ScopeGuard</h1>
-      {!paid && <p>Free uses remaining: {remaining}</p>}
+
+      {!paid && (
+        <p>
+          Free uses remaining: <strong>{remaining}</strong>
+        </p>
+      )}
 
       <h3>Company Profile</h3>
       {["name", "address", "phone", "email"].map((f) => (
@@ -192,9 +228,16 @@ export default function Home() {
           placeholder={f}
           value={(companyProfile as any)[f]}
           onChange={(e) =>
-            setCompanyProfile({ ...companyProfile, [f]: e.target.value })
+            setCompanyProfile({
+              ...companyProfile,
+              [f]: e.target.value,
+            })
           }
-          style={{ width: "100%", marginBottom: 8, padding: 8 }}
+          style={{
+            width: "100%",
+            padding: 8,
+            marginBottom: 8,
+          }}
         />
       ))}
 
@@ -202,36 +245,103 @@ export default function Home() {
         placeholder="Describe the scope change…"
         value={scopeChange}
         onChange={(e) => setScopeChange(e.target.value)}
-        style={{ width: "100%", height: 120 }}
+        style={{
+          width: "100%",
+          height: 120,
+          marginTop: 8,
+        }}
       />
 
-      <button onClick={generate} disabled={loading || locked}>
-        Generate Change Order
+      <button
+        onClick={generate}
+        disabled={locked || loading || !scopeChange.trim()}
+        style={{
+          width: "100%",
+          padding: "12px 16px",
+          marginTop: 12,
+          fontSize: 16,
+          background: locked ? "#ccc" : "#000",
+          color: "#fff",
+          border: "none",
+          borderRadius: 8,
+          cursor: locked ? "not-allowed" : "pointer",
+        }}
+      >
+        {loading
+          ? "Generating…"
+          : "Generate Professional Change Order"}
       </button>
 
+      {status && (
+        <p style={{ marginTop: 12, color: "#555" }}>
+          {status}
+        </p>
+      )}
+
       {locked && (
-        <button onClick={upgrade} style={{ marginTop: 12 }}>
+        <button
+          onClick={upgrade}
+          style={{
+            width: "100%",
+            marginTop: 12,
+            padding: 12,
+          }}
+        >
           Upgrade for Unlimited Access
         </button>
       )}
 
       {result && (
         <>
-          <h3>Pricing (Editable)</h3>
-          {["labor", "materials", "subs", "markup", "total"].map((k) => (
-            <input
-              key={k}
-              type="number"
-              value={(pricing as any)[k]}
-              onChange={(e) =>
-                setPricing({ ...pricing, [k]: Number(e.target.value) })
-              }
-            />
-          ))}
+          <h3 style={{ marginTop: 24 }}>
+            Pricing (Editable)
+          </h3>
 
-          <button onClick={downloadPDF}>Download PDF</button>
+          {["labor", "materials", "subs", "markup"].map(
+            (k) => (
+              <label
+                key={k}
+                style={{ display: "block", marginBottom: 8 }}
+              >
+                {k.charAt(0).toUpperCase() + k.slice(1)}
+                <input
+                  type="number"
+                  value={(pricing as any)[k]}
+                  onChange={(e) =>
+                    setPricing({
+                      ...pricing,
+                      [k]: Number(e.target.value),
+                    })
+                  }
+                  style={{
+                    width: "100%",
+                    padding: 8,
+                  }}
+                />
+              </label>
+            )
+          )}
+
+          <p>
+            <strong>Total: ${pricing.total}</strong>
+          </p>
+
+          <button onClick={downloadPDF}>
+            Download PDF
+          </button>
         </>
       )}
+
+      <p
+        style={{
+          marginTop: 40,
+          fontSize: 12,
+          color: "#888",
+          textAlign: "center",
+        }}
+      >
+        Secure payments powered by Stripe.
+      </p>
     </main>
   )
 }
