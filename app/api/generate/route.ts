@@ -1,66 +1,67 @@
-import { NextResponse } from "next/server";
-import OpenAI from "openai";
+import { NextResponse } from "next/server"
+import OpenAI from "openai"
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY!,
-});
+})
 
 export async function POST(req: Request) {
-  const { scopeChange } = await req.json();
+  const { scopeChange } = await req.json()
 
-  const systemPrompt = `
-You are a construction estimator.
+  if (!scopeChange) {
+    return NextResponse.json(
+      { error: "Missing scope" },
+      { status: 400 }
+    )
+  }
 
-Based on the scope description, estimate:
-- labor cost
-- material cost
-- subcontractor cost (if applicable)
+  const prompt = `
+You are a professional residential renovation estimator.
 
-Return JSON ONLY in this exact format:
+Given the scope change below, do ALL of the following:
+
+1. Write a clear, professional CHANGE ORDER description suitable for a contractor-client agreement.
+2. Estimate realistic COST TOTALS (not line items) for:
+   - labor
+   - materials
+   - subcontractors
+3. Apply a standard 20% contractor markup.
+4. Return ONLY valid JSON in this exact format:
 
 {
-  "text": "Professional change order description",
-  "labor": number,
-  "materials": number,
-  "subs": number
+  "description": "string",
+  "pricing": {
+    "labor": number,
+    "materials": number,
+    "subs": number,
+    "markup": 20
+  }
 }
 
-Guidelines:
-- Interior painting: $2–$4 per sq ft labor
-- Flooring: $5–$12 per sq ft
-- Electrical: $85–$125/hr
-- Plumbing: $90–$150/hr
-- If no subs needed, subs = 0
-- Round to nearest whole dollar
-`;
+Scope change:
+${scopeChange}
+`
 
   const completion = await openai.chat.completions.create({
-    model: "gpt-4.1-mini",
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: scopeChange },
-    ],
-    temperature: 0.2,
-  });
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: prompt }],
+    temperature: 0.4,
+  })
 
-  const raw = completion.choices[0].message.content || "{}";
+  const raw = completion.choices[0].message.content || ""
 
-  let parsed;
+  let parsed
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(raw)
   } catch {
-    return NextResponse.json({
-      text: "Error generating estimate.",
-      labor: 0,
-      materials: 0,
-      subs: 0,
-    });
+    return NextResponse.json(
+      { error: "AI returned invalid JSON", raw },
+      { status: 500 }
+    )
   }
 
   return NextResponse.json({
-    text: parsed.text,
-    labor: parsed.labor || 0,
-    materials: parsed.materials || 0,
-    subs: parsed.subs || 0,
-  });
+    text: parsed.description,
+    pricing: parsed.pricing,
+  })
 }
