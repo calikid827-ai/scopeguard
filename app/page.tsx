@@ -32,6 +32,7 @@ export default function Home() {
   // -------------------------
   const [scopeChange, setScopeChange] = useState("")
   const [result, setResult] = useState("")
+  const [trade, setTrade] = useState("")
   const [pricing, setPricing] = useState({
     labor: 0,
     materials: 0,
@@ -105,8 +106,9 @@ export default function Home() {
     }
 
     const data = await res.json()
-    setResult(data.text || "")
-    if (data.pricing) setPricing(data.pricing)
+    setResult(data.text)
+if (data.pricing) setPricing(data.pricing)
+if (data.trade) setTrade(data.trade)
 
     setLoading(false)
     setStatus("")
@@ -271,6 +273,17 @@ export default function Home() {
           ? "Generating…"
           : "Generate Professional Change Order"}
       </button>
+      {trade && (
+  <p
+    style={{
+      color: "#555",
+      marginTop: 12,
+      fontSize: 14,
+    }}
+  >
+    Detected Trade: <strong>{trade}</strong>
+  </p>
+)}
 
       {status && (
         <p style={{ marginTop: 12, color: "#555" }}>
