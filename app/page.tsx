@@ -6,6 +6,38 @@ export default function Home() {
   const FREE_LIMIT = 3
 
   // -------------------------
+  // Entitlement (email-based)
+  // -------------------------
+  const [email, setEmail] = useState("")
+  const [paid, setPaid] = useState(false)
+
+  useEffect(() => {
+    const saved = localStorage.getItem("scopeguard_email")
+    if (saved) setEmail(saved)
+  }, [])
+
+  useEffect(() => {
+    if (email) localStorage.setItem("scopeguard_email", email)
+  }, [email])
+
+  useEffect(() => {
+    if (!email) return
+
+    async function checkEntitlement() {
+      const res = await fetch("/api/entitlement", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      })
+
+      const data = await res.json()
+      setPaid(data.entitled === true)
+    }
+
+    checkEntitlement()
+  }, [email])
+
+  // -------------------------
   // Company profile (persisted)
   // -------------------------
   const [companyProfile, setCompanyProfile] = useState({
@@ -43,22 +75,11 @@ export default function Home() {
   })
 
   const [count, setCount] = useState(0)
-  const [paid, setPaid] = useState(false)
   const [status, setStatus] = useState("")
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
     setCount(Number(localStorage.getItem("changeOrderCount") || "0"))
-
-    if (localStorage.getItem("scopeguard_paid") === "true") {
-      setPaid(true)
-    }
-
-    if (window.location.search.includes("paid=true")) {
-      localStorage.setItem("scopeguard_paid", "true")
-      setPaid(true)
-      window.history.replaceState({}, "", "/")
-    }
   }, [])
 
   const locked = !paid && count >= FREE_LIMIT
@@ -82,7 +103,7 @@ export default function Home() {
   ])
 
   // -------------------------
-  // Generate AI change order
+  // Generate AI document
   // -------------------------
   async function generate() {
     if (locked) {
@@ -91,39 +112,36 @@ export default function Home() {
     }
 
     setLoading(true)
-    setStatus("Generating professional change order…")
+    setStatus("Generating pricing and scope…")
     setResult("")
 
     const res = await fetch("/api/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-  scopeChange,
-  trade,
-  state,
-}),
+        scopeChange,
+        trade,
+        state,
+      }),
     })
 
     if (!res.ok) {
-      setStatus("Error generating change order.")
+      setStatus("Error generating document.")
       setLoading(false)
       return
     }
 
     const data = await res.json()
     setResult(data.text)
-if (data.pricing) setPricing(data.pricing)
-if (!trade && data.trade) setTrade(data.trade)
+    if (data.pricing) setPricing(data.pricing)
+    if (!trade && data.trade) setTrade(data.trade)
 
     setLoading(false)
     setStatus("")
 
     if (!paid) {
       const newCount = count + 1
-      localStorage.setItem(
-        "changeOrderCount",
-        newCount.toString()
-      )
+      localStorage.setItem("changeOrderCount", newCount.toString())
       setCount(newCount)
     }
   }
@@ -133,9 +151,7 @@ if (!trade && data.trade) setTrade(data.trade)
   // -------------------------
   async function upgrade() {
     setStatus("Redirecting to secure checkout…")
-    const res = await fetch("/api/checkout", {
-      method: "POST",
-    })
+    const res = await fetch("/api/checkout", { method: "POST" })
     const data = await res.json()
     if (data.url) window.location.href = data.url
     else setStatus("Checkout error.")
@@ -151,7 +167,7 @@ if (!trade && data.trade) setTrade(data.trade)
     win.document.write(`
       <html>
         <head>
-          <title>Change Order</title>
+          <title>Change Order / Estimate</title>
           <style>
             body { font-family: system-ui; padding: 40px; }
             h1 { margin-bottom: 4px; }
@@ -212,11 +228,10 @@ if (!trade && data.trade) setTrade(data.trade)
         maxWidth: 640,
         margin: "60px auto",
         padding: 32,
-        fontFamily:
-          "system-ui, -apple-system, BlinkMacSystemFont",
+        fontFamily: "system-ui",
         border: "1px solid #e5e7eb",
         borderRadius: 14,
-        background: "#ffffff",
+        background: "#fff",
         boxShadow: "0 4px 12px rgba(0,0,0,0.05)",
       }}
     >
@@ -228,146 +243,43 @@ if (!trade && data.trade) setTrade(data.trade)
         </p>
       )}
 
-      <h3>Company Profile</h3>
-      {["name", "address", "phone", "email"].map((f) => (
-        <input
-          key={f}
-          placeholder={f}
-          value={(companyProfile as any)[f]}
-          onChange={(e) =>
-            setCompanyProfile({
-              ...companyProfile,
-              [f]: e.target.value,
-            })
-          }
-          style={{
-            width: "100%",
-            padding: 8,
-            marginBottom: 8,
-          }}
-        />
-      ))}
-<label style={{ display: "block", marginTop: 16 }}>
-  Trade Type
-</label>
-<select
-  value={trade}
-  onChange={(e) => setTrade(e.target.value)}
-  style={{
-    width: "100%",
-    padding: 10,
-    borderRadius: 6,
-    border: "1px solid #ccc",
-    marginBottom: 12,
-  }}
->
-  <option value="">Auto-detect trade</option>
-  <option value="painting">Painting</option>
-  <option value="flooring">Flooring</option>
-  <option value="electrical">Electrical</option>
-  <option value="plumbing">Plumbing</option>
-  <option value="tile">Tile / Bathroom</option>
-  <option value="carpentry">Carpentry</option>
-  <option value="general renovation">General Renovation</option>
-</select>
+      <input
+        type="email"
+        placeholder="Email used at checkout"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        style={{ width: "100%", padding: 8, marginBottom: 12 }}
+      />
 
-
-{trade && (
-  <p style={{ color: "#555", marginBottom: 12 }}>
-    Detected Trade: <strong>{trade}</strong>
-  </p>
-)}
-<label style={{ display: "block", marginTop: 12 }}>
-  Job State
-  <select
-    value={state}
-    onChange={(e) => setState(e.target.value)}
-    style={{
-      width: "100%",
-      padding: 10,
-      marginTop: 6,
-      borderRadius: 6,
-      border: "1px solid #ccc",
-    }}
-  >
-    <option value="">Select state</option>
-    <option value="CA">California</option>
-    <option value="TX">Texas</option>
-    <option value="FL">Florida</option>
-    <option value="NY">New York</option>
-    <option value="AZ">Arizona</option>
-    <option value="WA">Washington</option>
-    <option value="CO">Colorado</option>
-    <option value="GA">Georgia</option>
-    <option value="IL">Illinois</option>
-    <option value="NC">North Carolina</option>
-  </select>
-</label>
       <textarea
         placeholder="Describe the scope change…"
         value={scopeChange}
         onChange={(e) => setScopeChange(e.target.value)}
-        style={{
-          width: "100%",
-          height: 120,
-          marginTop: 8,
-        }}
+        style={{ width: "100%", height: 120 }}
       />
-     
 
       <button
         onClick={generate}
         disabled={locked || loading || !scopeChange.trim()}
         style={{
           width: "100%",
-          padding: "12px 16px",
+          padding: 12,
           marginTop: 12,
-          fontSize: 16,
           background: locked ? "#ccc" : "#000",
           color: "#fff",
           border: "none",
           borderRadius: 8,
-          cursor: locked ? "not-allowed" : "pointer",
         }}
       >
         {loading
-  ? "Generating pricing and scope…"
-  : "Generate Change Order / Estimate"}
+          ? "Generating pricing and scope…"
+          : "Generate Change Order / Estimate"}
       </button>
-      {result && (
-  <div
-    style={{
-      marginTop: 24,
-      padding: 16,
-      background: "#f5f5f5",
-      borderRadius: 8,
-      whiteSpace: "pre-wrap",
-      lineHeight: 1.6,
-      fontSize: 15,
-    }}
-  >
-    <h3 style={{ marginBottom: 8 }}>Generated Change Order / Estimate</h3>
-    <p style={{ fontSize: 13, color: "#666", marginBottom: 8 }}>
-  This document may be used as an estimate or a change order depending on contract status.
-</p>
-    {result}
-  </div>
-)}
-
-      {status && (
-        <p style={{ marginTop: 12, color: "#555" }}>
-          {status}
-        </p>
-      )}
 
       {locked && (
         <button
           onClick={upgrade}
-          style={{
-            width: "100%",
-            marginTop: 12,
-            padding: 12,
-          }}
+          style={{ width: "100%", marginTop: 12, padding: 12 }}
         >
           Upgrade for Unlimited Access
         </button>
@@ -379,38 +291,23 @@ if (!trade && data.trade) setTrade(data.trade)
             Pricing (Editable)
           </h3>
 
-          {["labor", "materials", "subs", "markup"].map(
-            (k) => (
-              <label
-                key={k}
-                style={{ display: "block", marginBottom: 8 }}
-              >
-                {k.charAt(0).toUpperCase() + k.slice(1)}
-                <input
-                  type="number"
-                  value={(pricing as any)[k]}
-                  onChange={(e) =>
-                    setPricing({
-                      ...pricing,
-                      [k]: Number(e.target.value),
-                    })
-                  }
-                  style={{
-                    width: "100%",
-                    padding: 8,
-                  }}
-                />
-              </label>
-            )
-          )}
+          {["labor", "materials", "subs", "markup"].map((k) => (
+            <input
+              key={k}
+              type="number"
+              value={(pricing as any)[k]}
+              onChange={(e) =>
+                setPricing({ ...pricing, [k]: Number(e.target.value) })
+              }
+              style={{ width: "100%", padding: 8, marginBottom: 8 }}
+            />
+          ))}
 
           <p>
             <strong>Total: ${pricing.total}</strong>
           </p>
 
-          <button onClick={downloadPDF}>
-            Download PDF
-          </button>
+          <button onClick={downloadPDF}>Download PDF</button>
         </>
       )}
 
