@@ -23,20 +23,30 @@ export default function Home() {
   }, [email])
 
   useEffect(() => {
-    if (!email) return
+  if (!email) return
 
-    async function checkEntitlement() {
+  async function checkEntitlement() {
+    try {
       const res = await fetch("/api/entitlement", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email }),
       })
-      const data = await res.json()
-      setPaid(data.entitled === true)
-    }
 
-    checkEntitlement()
-  }, [email])
+      if (!res.ok) {
+        console.warn("Entitlement API returned", res.status)
+        return
+      }
+
+      const data = await res.json()
+      setPaid(data?.entitled === true)
+    } catch (err) {
+      console.warn("Entitlement check failed (local dev)", err)
+    }
+  }
+
+  checkEntitlement()
+}, [email])
 
   // -------------------------
   // Company profile (persisted)
@@ -390,6 +400,37 @@ async function generate() {
 >
   {loading ? "Generating…" : "Generate Change Order / Estimate"}
 </button>
+
+{result && (
+  <div
+    style={{
+      marginTop: 24,
+      padding: 16,
+      background: "#f5f5f5",
+      borderRadius: 8,
+      whiteSpace: "pre-wrap",
+      lineHeight: 1.6,
+      fontSize: 15,
+    }}
+  >
+    <h3 style={{ marginBottom: 8 }}>
+      Generated Change Order / Estimate
+    </h3>
+
+    <p
+      style={{
+        fontSize: 13,
+        color: "#666",
+        marginBottom: 12,
+      }}
+    >
+      This description is generated based on the scope provided and may be
+      used as an estimate or a change order depending on contract status.
+    </p>
+
+    <p>{result}</p>
+  </div>
+)}
 
       {locked && (
         <button
