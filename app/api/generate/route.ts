@@ -109,7 +109,7 @@ DOCUMENT RULES (CRITICAL):
 - Be detailed and specific about the scope of work
 - Describe labor activities, materials, and intent clearly
 - Do NOT include disclaimers or markdown
-- Write 2–4 full sentences describing the scope in detail
+- Write 3–5 professional sentences describing the scope in detail, including preparation, execution, and completion intent where relevant
 
 PRICING RULES:
 - Use realistic 2024–2025 U.S. contractor pricing
