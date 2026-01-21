@@ -106,13 +106,14 @@ DOCUMENT RULES (CRITICAL):
 - If unclear → "Change Order / Estimate"
 - The opening sentence MUST explicitly state the document type
 - Use professional, contract-ready language
+- Do NOT mention AI or assumptions
 
 PRICING RULES:
 - Use realistic 2024–2025 U.S. contractor pricing
 - Adjust labor rates based on the job state
 - Mid-market residential work
 - Totals only (no line items)
-- Round to whole dollars
+- Round all dollar values to whole numbers
 
 TRADE PRICING GUIDANCE:
 - Painting → labor-heavy, low materials
@@ -172,11 +173,19 @@ Return ONLY valid JSON.
       )
     }
 
+    // -----------------------------
+    // SAFETY CLAMP
+    // -----------------------------
+    const safePricing = clampPricing(parsed.pricing)
+
+    // -----------------------------
+    // FINAL RESPONSE (UI-READY)
+    // -----------------------------
     return NextResponse.json({
       documentType: parsed.documentType,
       trade: parsed.trade || trade,
       text: parsed.description,
-      pricing: clampPricing(parsed.pricing),
+      pricing: safePricing,
     })
   } catch (error) {
     console.error("AI generation failed:", error)
