@@ -5,9 +5,7 @@ import { createClient } from "@supabase/supabase-js"
 export const dynamic = "force-dynamic"
 
 // Stripe
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: "2023-10-16",
-})
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!)
 
 // Supabase (SERVICE ROLE — backend only)
 const supabase = createClient(
