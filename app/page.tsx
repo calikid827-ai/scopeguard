@@ -292,12 +292,13 @@ async function generate() {
 <p
   style={{
     fontSize: 12,
-    color: "#666",
+    color: "#c53030",
     marginTop: 4,
     marginBottom: 12,
   }}
+  title="Email is required to generate documents"
 >
-  Required to generate a change order or estimate.
+  * Required
 </p>
 
       <h3>Company Profile</h3>
