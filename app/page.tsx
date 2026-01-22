@@ -478,13 +478,17 @@ async function generate() {
     <label>
       Labor
       <input
-        type="number"
-        value={pricing.labor}
-        onChange={(e) =>
-          setPricing({ ...pricing, labor: Number(e.target.value) })
-        }
-        style={{ width: "100%", padding: 8, marginBottom: 8 }}
-      />
+  type="number"
+  value={pricing.labor === 0 ? "" : pricing.labor}
+  onChange={(e) => {
+    const val = e.target.value
+    setPricing({
+      ...pricing,
+      labor: val === "" ? 0 : Number(val),
+    })
+  }}
+  style={{ width: "100%", padding: 8, marginBottom: 8 }}
+/>
     </label>
 
     <label>
@@ -502,25 +506,33 @@ async function generate() {
     <label>
       Subcontractors
       <input
-        type="number"
-        value={pricing.subs}
-        onChange={(e) =>
-          setPricing({ ...pricing, subs: Number(e.target.value) })
-        }
-        style={{ width: "100%", padding: 8, marginBottom: 8 }}
-      />
+  type="number"
+  value={pricing.subs === 0 ? "" : pricing.subs}
+  onChange={(e) => {
+    const val = e.target.value
+    setPricing({
+      ...pricing,
+      subs: val === "" ? 0 : Number(val),
+    })
+  }}
+  style={{ width: "100%", padding: 8, marginBottom: 8 }}
+/>
     </label>
 
     <label>
       Markup (%)
       <input
-        type="number"
-        value={pricing.markup}
-        onChange={(e) =>
-          setPricing({ ...pricing, markup: Number(e.target.value) })
-        }
-        style={{ width: "100%", padding: 8, marginBottom: 8 }}
-      />
+  type="number"
+  value={pricing.markup === 0 ? "" : pricing.markup}
+  onChange={(e) => {
+    const val = e.target.value
+    setPricing({
+      ...pricing,
+      markup: val === "" ? 0 : Number(val),
+    })
+  }}
+  style={{ width: "100%", padding: 8, marginBottom: 8 }}
+/>
     </label>
 
     <p style={{ marginTop: 12 }}>
