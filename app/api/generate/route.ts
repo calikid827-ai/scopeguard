@@ -270,6 +270,7 @@ Rules:
     const raw = completion.choices[0]?.message?.content
     if (!raw) throw new Error("Empty AI response")
 
+
     const parsed: any = JSON.parse(raw)
 
     const normalized: any = {
