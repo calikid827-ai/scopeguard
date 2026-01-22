@@ -215,6 +215,14 @@ DOCUMENT RULES (CRITICAL):
 - Write 3–5 clear, detailed sentences
 - No disclaimers or markdown
 
+ADVANCED DESCRIPTION RULES:
+- Reference existing conditions where applicable (e.g., "existing finishes", "current layout")
+- Clarify whether work is additive, corrective, or preparatory
+- Tie scope to client request or site conditions when possible
+- Use neutral, professional contract language (not sales copy)
+- Avoid vague phrases like "as needed" or "where required"
+- Imply scope boundaries without listing exclusions explicitly
+
 PRICING RULES:
 - Use realistic 2024–2025 U.S. contractor pricing
 - Adjust labor rates based on job state
