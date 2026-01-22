@@ -30,6 +30,11 @@ const supabase = createClient(
 )
 
 // -----------------------------
+// CONSTANTS
+// -----------------------------
+const FREE_LIMIT = 3
+
+// -----------------------------
 // TYPES
 // -----------------------------
 type Pricing = {
@@ -89,7 +94,7 @@ function autoDetectTrade(scope: string): string {
   return "general renovation"
 }
 
-// 🧠 Estimate vs Change Order intent hint (soft guidance)
+// 🧠 Estimate vs Change Order intent hint
 function detectIntent(scope: string): string {
   const s = scope.toLowerCase()
 
@@ -137,20 +142,37 @@ export async function POST(req: Request) {
     }
 
     // -----------------------------
-    // ENTITLEMENT CHECK
-    // Paid users identified here
-    // Free users enforced client-side
+    // ENTITLEMENT + FREE LIMIT ENFORCEMENT
     // -----------------------------
-    const { data: entitlement } = await supabase
-      .from("entitlements")
-      .select("active")
-      .eq("email", email)
-      .single()
+    const { data: entitlement, error } = await supabase
+  .from("entitlements")
+  .select("active, usage_count")
+  .eq("email", email)
+  .maybeSingle()
 
     const isPaid = entitlement?.active === true
+const usageCount =
+  typeof entitlement?.usage_count === "number"
+    ? entitlement.usage_count
+    : 0
 
-    // Intentionally allow both paid and free users here
-    // Client handles free limits
+    // HARD abuse protection (refresh spam, bots)
+if (!isPaid && usageCount > FREE_LIMIT + 1) {
+  return NextResponse.json(
+    { error: "Rate limited" },
+    { status: 429 }
+  )
+}
+
+// Normal free limit
+if (!isPaid && usageCount >= FREE_LIMIT) {
+  return NextResponse.json(
+    { error: "Free limit reached" },
+    { status: 403 }
+  )
+}
+
+   
 
     // -----------------------------
     // STATE NORMALIZATION
@@ -212,13 +234,14 @@ TRADE PRICING GUIDANCE:
 MARKUP RULE:
 - Suggest markup between 15–25%
 
-OUTPUT FORMAT:
-Return ONLY valid JSON.
+OUTPUT FORMAT (STRICT — REQUIRED):
+Return ONLY valid JSON matching EXACTLY this schema.
+All fields are REQUIRED. Do not omit any field.
 
 {
   "documentType": "Change Order | Estimate | Change Order / Estimate",
-  "trade": "<confirmed trade>",
-  "description": "<professional description beginning with document type>",
+  "trade": "<string>",
+  "description": "<string>",
   "pricing": {
     "labor": <number>,
     "materials": <number>,
@@ -227,6 +250,11 @@ Return ONLY valid JSON.
     "total": <number>
   }
 }
+
+Rules:
+- Use the exact field names shown (case-sensitive)
+- Include ALL fields
+- Use numbers only for pricing values
 `
 
     // -----------------------------
@@ -242,26 +270,54 @@ Return ONLY valid JSON.
     const raw = completion.choices[0]?.message?.content
     if (!raw) throw new Error("Empty AI response")
 
-    const parsed: AIResponse = JSON.parse(raw)
+    const parsed: any = JSON.parse(raw)
+
+    const normalized: any = {
+  documentType: parsed.documentType ?? parsed.document_type,
+  trade: parsed.trade,
+  description: parsed.description,
+  pricing: parsed.pricing,
+}
+const allowedTypes = [
+  "Change Order",
+  "Estimate",
+  "Change Order / Estimate",
+]
+
+if (!allowedTypes.includes(normalized.documentType)) {
+  normalized.documentType = "Change Order / Estimate"
+}
 
     if (
-      typeof parsed.description !== "string" ||
-      !isValidPricing(parsed.pricing)
-    ) {
-      return NextResponse.json(
-        { error: "AI response invalid", parsed },
-        { status: 500 }
-      )
-    }
+  typeof normalized.documentType !== "string" ||
+  typeof normalized.description !== "string" ||
+  !isValidPricing(normalized.pricing)
+) {
+  return NextResponse.json(
+    { error: "AI response invalid", parsed },
+    { status: 500 }
+  )
+}
 
-    const safePricing = clampPricing(parsed.pricing)
+    const safePricing = clampPricing(normalized.pricing)
 
-    return NextResponse.json({
-      documentType: parsed.documentType,
-      trade: parsed.trade || trade,
-      text: parsed.description,
-      pricing: safePricing,
+    // Increment usage for free users only
+    if (!isPaid) {
+  await supabase
+    .from("entitlements")
+    .upsert({
+      email,
+      active: false,
+      usage_count: usageCount + 1,
     })
+}
+
+return NextResponse.json({
+  documentType: normalized.documentType,
+  trade: normalized.trade || trade,
+  text: normalized.description,
+  pricing: safePricing,
+})
   } catch (err) {
     console.error("Generate failed:", err)
     return NextResponse.json(
