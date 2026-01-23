@@ -13,18 +13,12 @@ export async function POST() {
     if (!priceId) throw new Error("STRIPE_PRICE_ID missing")
     if (!siteUrl) throw new Error("NEXT_PUBLIC_SITE_URL missing")
 
-    const stripe = new Stripe(secretKey, {
-      apiVersion: "2024-06-20", // ✅ pin API version (important)
-    })
+    const stripe = new Stripe(secretKey)
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
-      line_items: [
-        {
-          price: priceId,
-          quantity: 1,
-        },
-      ],
+      customer_creation: "always",
+      line_items: [{ price: priceId, quantity: 1 }],
       success_url: `${siteUrl}/success`,
       cancel_url: `${siteUrl}/cancel`,
     })
@@ -34,7 +28,9 @@ export async function POST() {
     console.error("Stripe checkout error:", err)
 
     return NextResponse.json(
-      { error: err?.message || "Stripe checkout failed" },
+      {
+        error: err?.message || "Stripe checkout failed",
+      },
       { status: 500 }
     )
   }
