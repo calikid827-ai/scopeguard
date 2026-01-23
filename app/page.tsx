@@ -30,6 +30,8 @@ useEffect(() => {
 useEffect(() => {
   if (email) {
     localStorage.setItem(STORAGE_KEY, email)
+  } else {
+    localStorage.removeItem(STORAGE_KEY)
   }
 }, [email])
 
