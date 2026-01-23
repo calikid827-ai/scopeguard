@@ -11,27 +11,29 @@ export default function Home() {
 const [email, setEmail] = useState("")
 const [paid, setPaid] = useState(false)
 
-const STORAGE_KEY = "jobestimatepro_email"
+const EMAIL_KEY = "jobestimatepro_email"
+const COMPANY_KEY = "jobestimatepro_company"
+const USAGE_KEY = "jobestimatepro_usage_count"
 
 useEffect(() => {
   // migrate old key once if it exists
   const old = localStorage.getItem("scopeguard_email")
   if (old) {
-    localStorage.setItem(STORAGE_KEY, old)
+    localStorage.setItem(EMAIL_KEY, old)
     localStorage.removeItem("scopeguard_email")
     setEmail(old)
     return
   }
 
-  const saved = localStorage.getItem(STORAGE_KEY)
+  const saved = localStorage.getItem(EMAIL_KEY)
   if (saved) setEmail(saved)
 }, [])
 
 useEffect(() => {
   if (email) {
-    localStorage.setItem(STORAGE_KEY, email)
+    localStorage.setItem(EMAIL_KEY, email)
   } else {
-    localStorage.removeItem(STORAGE_KEY)
+    localStorage.removeItem(EMAIL_KEY)
   }
 }, [email])
 
@@ -72,16 +74,24 @@ useEffect(() => {
   })
 
   useEffect(() => {
-    const saved = localStorage.getItem("scopeguard_company")
-    if (saved) setCompanyProfile(JSON.parse(saved))
-  }, [])
+  const old = localStorage.getItem("scopeguard_company")
+  if (old) {
+    localStorage.setItem(COMPANY_KEY, old)
+    localStorage.removeItem("scopeguard_company")
+    setCompanyProfile(JSON.parse(old))
+    return
+  }
+
+  const saved = localStorage.getItem(COMPANY_KEY)
+  if (saved) setCompanyProfile(JSON.parse(saved))
+}, [])
 
   useEffect(() => {
-    localStorage.setItem(
-      "scopeguard_company",
-      JSON.stringify(companyProfile)
-    )
-  }, [companyProfile])
+  localStorage.setItem(
+    COMPANY_KEY,
+    JSON.stringify(companyProfile)
+  )
+}, [companyProfile])
 
   // -------------------------
   // App state
@@ -105,8 +115,16 @@ useEffect(() => {
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    setCount(Number(localStorage.getItem("changeOrderCount") || "0"))
-  }, [])
+  const old = localStorage.getItem("changeOrderCount")
+  if (old) {
+    localStorage.setItem(USAGE_KEY, old)
+    localStorage.removeItem("changeOrderCount")
+    setCount(Number(old))
+    return
+  }
+
+  setCount(Number(localStorage.getItem(USAGE_KEY) || "0"))
+}, [])
 
   const locked = !paid && count >= FREE_LIMIT
   const remaining = Math.max(0, FREE_LIMIT - count)
@@ -174,9 +192,9 @@ async function generate() {
     if (!paid) {
       const newCount = count + 1
       localStorage.setItem(
-        "changeOrderCount",
-        newCount.toString()
-      )
+  USAGE_KEY,
+  newCount.toString()
+)
       setCount(newCount)
     }
 
