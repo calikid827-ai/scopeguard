@@ -236,66 +236,213 @@ async function generate() {
   }
 }
 
-  // -------------------------
-  // PDF generation
+    // -------------------------
+  // PDF generation (Branded)
   // -------------------------
   function downloadPDF() {
-    const win = window.open("", "", "width=800,height=1000")
-    if (!win) return
+    if (!result) {
+      setStatus("Generate a document first, then download the PDF.")
+      return
+    }
+
+    const brandName = "JobEstimate Pro"
+    const companyName = companyProfile.name?.trim() || brandName
+    const companyAddress = companyProfile.address?.trim() || ""
+    const companyPhone = companyProfile.phone?.trim() || ""
+    const companyEmail = companyProfile.email?.trim() || ""
+
+    const win = window.open("", "", "width=900,height=1100")
+    if (!win) {
+      setStatus("Pop-up blocked. Please allow pop-ups to download the PDF.")
+      return
+    }
+
+    // Basic HTML escaping to prevent broken PDFs if user types special chars
+    const esc = (s: string) =>
+      s
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;")
+
+    const safeResult = esc(result)
 
     win.document.write(`
       <html>
         <head>
-          <title>Change Order / Estimate</title>
+          <title>${esc(brandName)} — Change Order / Estimate</title>
+          <meta charset="utf-8" />
           <style>
-            body { font-family: system-ui; padding: 40px; }
-            h1 { margin-bottom: 4px; }
-            .muted { color: #666; font-size: 14px; }
-            hr { margin: 24px 0; }
-            .pricing p { margin: 6px 0; }
-            .sign { margin-top: 60px; display: flex; justify-content: space-between; }
-            .line { border-top: 1px solid #000; width: 240px; margin-top: 40px; }
+            @page { margin: 28mm 20mm; }
+            body {
+              font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+              color: #111;
+            }
+            .header {
+              display: flex;
+              align-items: flex-start;
+              justify-content: space-between;
+              gap: 16px;
+              margin-bottom: 18px;
+              padding-bottom: 14px;
+              border-bottom: 2px solid #111;
+            }
+            .brand {
+              font-size: 18px;
+              font-weight: 800;
+              letter-spacing: 0.2px;
+            }
+            .brandTag {
+              margin-top: 4px;
+              font-size: 12px;
+              color: #444;
+            }
+            .company {
+              text-align: right;
+              font-size: 12px;
+              line-height: 1.5;
+              color: #222;
+              max-width: 55%;
+              word-wrap: break-word;
+            }
+            h1 {
+              font-size: 18px;
+              margin: 18px 0 6px;
+            }
+            .muted {
+              color: #555;
+              font-size: 12px;
+            }
+            .section {
+              margin-top: 18px;
+            }
+            .box {
+  margin-top: 10px;
+  padding: 14px;
+  border: 1px solid #cfcfcf;
+  border-radius: 10px;
+  background: #fff;
+  white-space: pre-wrap;
+  line-height: 1.55;
+  font-size: 13px;
+}
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              margin-top: 10px;
+              font-size: 13px;
+            }
+            td, th {
+              padding: 10px;
+              border-bottom: 1px solid #e5e5e5;
+            }
+            th {
+              text-align: left;
+              font-size: 12px;
+              color: #444;
+            }
+            .totalRow td {
+              font-weight: 800;
+              border-top: 2px solid #111;
+            }
+            .badge {
+              display: inline-block;
+              padding: 4px 8px;
+              border-radius: 999px;
+              font-size: 11px;
+              background: #f0f0f0;
+              color: #333;
+              margin-left: 8px;
+            }
+            .sign {
+              margin-top: 34px;
+              display: flex;
+              justify-content: space-between;
+              gap: 24px;
+            }
+            .sigBlock {
+              flex: 1;
+            }
+            .line {
+              border-top: 1px solid #111;
+              margin-top: 46px;
+              width: 100%;
+            }
+            .sigLabel {
+              margin-top: 8px;
+              font-size: 12px;
+              color: #333;
+            }
+            .footer {
+              margin-top: 26px;
+              padding-top: 10px;
+              border-top: 1px solid #eee;
+              font-size: 11px;
+              color: #666;
+              display: flex;
+              justify-content: space-between;
+              gap: 12px;
+            }
           </style>
         </head>
         <body>
-          <h1>${companyProfile.name}</h1>
-          <div class="muted">
-            ${companyProfile.address}<br/>
-            ${companyProfile.phone} · ${companyProfile.email}
+          <div class="header">
+            <div>
+              <div class="brand">${esc(brandName)}</div>
+              <div class="brandTag">Professional change orders & estimates — generated instantly.</div>
+            </div>
+            <div class="company">
+              <div style="font-weight:700; font-size:13px;">${esc(companyName)}</div>
+              ${companyAddress ? `<div>${esc(companyAddress)}</div>` : ""}
+              ${companyPhone ? `<div>${esc(companyPhone)}</div>` : ""}
+              ${companyEmail ? `<div>${esc(companyEmail)}</div>` : ""}
+            </div>
           </div>
 
-          <hr/>
+          <h1>Change Order / Estimate
+            ${pricingAdjusted ? `<span class="badge">Pricing adjusted</span>` : ""}
+          </h1>
+          <div class="muted">Generated by ${esc(brandName)}</div>
 
-          <h2>Change Order / Estimate</h2>
-          <p>${result}</p>
-
-          <hr/>
-
-          <div class="pricing">
-            <p>Labor: $${pricing.labor}</p>
-            <p>Materials: $${pricing.materials}</p>
-            <p>Subcontractors: $${pricing.subs}</p>
-            <p>Markup: ${pricing.markup}%</p>
-            <strong>Total: $${pricing.total}</strong>
+          <div class="section">
+            <div class="muted" style="margin-bottom:6px;">Scope / Description</div>
+            <div class="box">${safeResult}</div>
           </div>
 
-          ${pricingAdjusted ? "<p class='muted'>Pricing adjusted after AI generation.</p>" : ""}
+          <div class="section">
+            <div class="muted" style="margin-bottom:6px;">Pricing Summary</div>
+            <table>
+              <tr><th>Category</th><th style="text-align:right;">Amount</th></tr>
+              <tr><td>Labor</td><td style="text-align:right;">$${Number(pricing.labor || 0).toLocaleString()}</td></tr>
+              <tr><td>Materials</td><td style="text-align:right;">$${Number(pricing.materials || 0).toLocaleString()}</td></tr>
+              <tr><td>Subcontractors</td><td style="text-align:right;">$${Number(pricing.subs || 0).toLocaleString()}</td></tr>
+              <tr><td>Markup</td><td style="text-align:right;">${Number(pricing.markup || 0)}%</td></tr>
+              <tr class="totalRow"><td>Total</td><td style="text-align:right;">$${Number(pricing.total || 0).toLocaleString()}</td></tr>
+            </table>
+          </div>
 
           <div class="sign">
-            <div>
+            <div class="sigBlock">
               <div class="line"></div>
-              Contractor Signature
+              <div class="sigLabel">Contractor Signature</div>
             </div>
-            <div>
+            <div class="sigBlock">
               <div class="line"></div>
-              Client Signature
+              <div class="sigLabel">Client Signature</div>
             </div>
+          </div>
+
+          <div class="footer">
+            <div>${esc(brandName)}</div>
+            <div>${esc(new Date().toLocaleDateString())}</div>
           </div>
         </body>
       </html>
     `)
 
     win.document.close()
+    win.focus()
     win.print()
     win.close()
   }
