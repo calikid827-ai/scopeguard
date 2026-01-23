@@ -25,13 +25,15 @@ export async function POST() {
 
     return NextResponse.json({ url: session.url })
   } catch (err: any) {
-    console.error("Stripe checkout error:", err)
+  console.error("Stripe checkout error:", err)
 
-    return NextResponse.json(
-      {
-        error: err?.message || "Stripe checkout failed",
-      },
-      { status: 500 }
-    )
-  }
+  return NextResponse.json(
+    {
+      error: err.message,
+      type: err.type,
+      raw: err,
+    },
+    { status: 500 }
+  )
+}
 }
