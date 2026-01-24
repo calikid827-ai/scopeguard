@@ -65,6 +65,17 @@ function isValidPricing(p: any): p is Pricing {
   )
 }
 
+// ✅ Put coercePricing OUTSIDE clampPricing (top-level helper)
+function coercePricing(p: any): Pricing {
+  return {
+    labor: Number(p?.labor ?? 0),
+    materials: Number(p?.materials ?? 0),
+    subs: Number(p?.subs ?? 0),
+    markup: Number(p?.markup ?? 0),
+    total: Number(p?.total ?? 0),
+  }
+}
+
 function clampPricing(pricing: Pricing): Pricing {
   const MAX_TOTAL = 250_000
 
@@ -134,6 +145,8 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Email required" }, { status: 401 })
     }
 
+    const normalizedEmail = email.trim().toLowerCase()
+
     if (!scopeChange || typeof scopeChange !== "string") {
       return NextResponse.json(
         { error: "Invalid scopeChange" },
@@ -147,8 +160,13 @@ export async function POST(req: Request) {
     const { data: entitlement, error } = await supabase
   .from("entitlements")
   .select("active, usage_count")
-  .eq("email", email)
+  .eq("email", normalizedEmail)
   .maybeSingle()
+
+if (error) {
+  console.error("Supabase entitlement lookup error:", error)
+  return NextResponse.json({ error: "Entitlement lookup failed" }, { status: 500 })
+}
 
     const isPaid = entitlement?.active === true
 const usageCount =
@@ -243,6 +261,14 @@ ADVANCED DESCRIPTION RULES:
 - Avoid generic filler phrases such as “ensure a professional finish” or “industry standards”
 - Imply scope boundaries without listing exclusions explicitlys
 
+ADVANCED CONTRACT LANGUAGE ENHANCEMENTS (OPTIONAL BUT PREFERRED):
+- Reference sequencing or preparatory work when applicable (e.g., surface prep, demolition, protection)
+- Imply scope limits by referencing existing conditions without listing exclusions
+- Avoid absolute guarantees or warranties
+- Use passive contractual phrasing when appropriate (e.g., "Work includes...", "Scope covers...")
+- Where applicable, reference coordination with existing trades or finishes
+- Avoid repeating sentence structures across documents
+
 PRICING RULES:
 - Use realistic 2024–2025 U.S. contractor pricing
 - Adjust labor rates based on job state
@@ -307,6 +333,10 @@ Rules:
   description: parsed.description,
   pricing: parsed.pricing,
 }
+
+// 🔒 Coerce AI pricing to numbers (prevents string math bugs)
+normalized.pricing = coercePricing(normalized.pricing)
+
 const allowedTypes = [
   "Change Order",
   "Estimate",
@@ -395,17 +425,27 @@ if (Math.abs(p.total - impliedTotal) / impliedTotal > 0.2) {
 // PRICING REALISM v3 — STATE LABOR MULTIPLIER
 // -----------------------------
 
-const STATE_ABBREVIATIONS: Record<string, string> = {
-  California: "CA",
-  NewYork: "NY",
-  Texas: "TX",
-  Florida: "FL",
-  Washington: "WA",
-  Massachusetts: "MA",
-  NewJersey: "NJ",
-  Colorado: "CO",
-  Arizona: "AZ",
+const stateInput = (rawState || "").trim()
+
+const toAbbrev = (s: string) => {
+  const up = s.toUpperCase()
+  if (/^[A-Z]{2}$/.test(up)) return up
+
+  const map: Record<string, string> = {
+    "CALIFORNIA": "CA",
+    "NEW YORK": "NY",
+    "TEXAS": "TX",
+    "FLORIDA": "FL",
+    "WASHINGTON": "WA",
+    "MASSACHUSETTS": "MA",
+    "NEW JERSEY": "NJ",
+    "COLORADO": "CO",
+    "ARIZONA": "AZ",
+  }
+  return map[up] || ""
 }
+
+const stateAbbrev = toAbbrev(stateInput)
 
 const STATE_LABOR_MULTIPLIER: Record<string, number> = {
   CA: 1.25,
@@ -419,11 +459,7 @@ const STATE_LABOR_MULTIPLIER: Record<string, number> = {
   AZ: 1.02,
 }
 
-const stateKey =
-  STATE_ABBREVIATIONS[jobState.replace(/\s/g, "")] ?? jobState
-
-const stateMultiplier =
-  STATE_LABOR_MULTIPLIER[stateKey as keyof typeof STATE_LABOR_MULTIPLIER] ?? 1
+const stateMultiplier = STATE_LABOR_MULTIPLIER[stateAbbrev] ?? 1
 
 p.labor = Math.round(p.labor * stateMultiplier)
 
@@ -431,18 +467,29 @@ p.labor = Math.round(p.labor * stateMultiplier)
 p.total =
   p.labor + p.materials + p.subs +
   Math.round((p.labor + p.materials + p.subs) * (p.markup / 100))
-
-    const safePricing = clampPricing(normalized.pricing)
+ 
+  // Final clamp after all pricing adjustments
+normalized.pricing = clampPricing(p)
+const safePricing = normalized.pricing
 
     // Increment usage for free users only
     if (!isPaid) {
-  await supabase
+  // Update if row exists
+  const { data: updated } = await supabase
     .from("entitlements")
-    .upsert({
-      email,
+    .update({ usage_count: usageCount + 1 })
+    .eq("email", normalizedEmail)
+    .select("email")
+    .maybeSingle()
+
+  // If row doesn't exist, insert
+  if (!updated) {
+    await supabase.from("entitlements").insert({
+      email: normalizedEmail,
+      usage_count: 1,
       active: false,
-      usage_count: usageCount + 1,
     })
+  }
 }
 
 return NextResponse.json({

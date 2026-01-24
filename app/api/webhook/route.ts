@@ -3,6 +3,7 @@ import Stripe from "stripe"
 import { createClient } from "@supabase/supabase-js"
 
 export const dynamic = "force-dynamic"
+export const runtime = "nodejs"
 
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
@@ -43,33 +44,41 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Invalid signature" }, { status: 400 })
   }
 
-  if (event.type === "checkout.session.completed") {
-    console.log("🎉 Checkout session completed")
+    if (event.type === "checkout.session.completed") {
+  console.log("🎉 Checkout session completed")
 
-    const session = event.data.object as Stripe.Checkout.Session
-    const email = session.customer_details?.email
-    const customerId = session.customer as string | null
+  const session = event.data.object as Stripe.Checkout.Session
+  const rawEmail = session.customer_details?.email
+  const email = rawEmail ? rawEmail.trim().toLowerCase() : null
+  const normalizedEmail = email
+  const customerId = session.customer as string | null
 
-    console.log("📧 Email:", email)
-    console.log("👤 Customer ID:", customerId)
+  console.log("📧 Email:", email)
+  console.log("👤 Customer ID:", customerId)
 
-    if (!email) {
-      console.error("❌ No email in checkout session")
-      return NextResponse.json({ received: true })
-    }
-
-    const { data, error } = await supabase
-      .from("entitlements")
-      .upsert({
-        email,
-        stripe_customer_id: customerId ?? null,
-        active: true,
-      })
-      .select()
-
-    console.log("🟢 Supabase data:", data)
-    console.log("🔴 Supabase error:", error)
+  if (!email) {
+    console.error("❌ No email in checkout session")
+    return NextResponse.json({ received: true })
   }
+
+  if (session.payment_status && session.payment_status !== "paid") {
+  console.warn("⚠️ Session not paid:", session.payment_status)
+  return NextResponse.json({ received: true })
+}
+
+  const { error } = await supabase
+    .from("entitlements")
+    .upsert(
+      { email, stripe_customer_id: customerId ?? null, active: true },
+      { onConflict: "email" }
+    )
+
+  if (error) {
+    console.error("❌ Supabase upsert failed:", error)
+    // 500 tells Stripe to retry (correct behavior)
+    return NextResponse.json({ error: "DB write failed" }, { status: 500 })
+  }
+}
 
   return NextResponse.json({ received: true })
 }
