@@ -37,31 +37,19 @@ useEffect(() => {
   }
 }, [email])
 
-  useEffect(() => {
+  async function checkEntitlementNow() {
   if (!email) return
 
-  async function checkEntitlement() {
-    try {
-      const res = await fetch("/api/entitlement", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
-      })
+  const res = await fetch("/api/entitlement", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: email.trim().toLowerCase() }),
+  })
 
-      if (!res.ok) {
-        console.warn("Entitlement API returned", res.status)
-        return
-      }
+  const data = await res.json()
+  setPaid(data?.entitled === true)
+}
 
-      const data = await res.json()
-      setPaid(data?.entitled === true)
-    } catch (err) {
-      console.warn("Entitlement check failed (local dev)", err)
-    }
-  }
-
-  checkEntitlement()
-}, [email])
 
   // -------------------------
   // Company profile (persisted)
@@ -487,6 +475,7 @@ async function generate() {
   placeholder="Email used at checkout"
   value={email}
   onChange={(e) => setEmail(e.target.value)}
+  onBlur={checkEntitlementNow}
   style={{ width: "100%", padding: 8 }}
 />
 
@@ -649,15 +638,14 @@ async function generate() {
     </h3>
 
     <p
-      style={{
-        fontSize: 13,
-        color: "#666",
-        marginBottom: 12,
-      }}
-    >
-      This description is generated based on the scope provided and may be
-      used as an estimate or a change order depending on contract status.
-    </p>
+  style={{
+    fontSize: 13,
+    color: "#666",
+    marginBottom: 12,
+  }}
+>
+  Generated from the scope provided.
+</p>
 
     <p>{result}</p>
   </div>
