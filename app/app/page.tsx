@@ -755,7 +755,7 @@ function loadHistoryItem(item: EstimateHistoryItem) {
               <tr><th>Category</th><th style="text-align:right;">Amount</th></tr>
               <tr><td>Labor</td><td style="text-align:right;">$${Number(pricing.labor || 0).toLocaleString()}</td></tr>
               <tr><td>Materials</td><td style="text-align:right;">$${Number(pricing.materials || 0).toLocaleString()}</td></tr>
-              <tr><td>Subcontractors</td><td style="text-align:right;">$${Number(pricing.subs || 0).toLocaleString()}</td></tr>
+              <tr><td>Other / Mobilization</td><td style="text-align:right;">$${Number(pricing.subs || 0).toLocaleString()}</td></tr>
               <tr><td>Markup</td><td style="text-align:right;">${Number(pricing.markup || 0)}%</td></tr>
               <tr class="totalRow"><td>Total</td><td style="text-align:right;">$${Number(pricing.total || 0).toLocaleString()}</td></tr>
             </table>
@@ -998,7 +998,7 @@ function createInvoiceFromEstimate(est: EstimateHistoryItem) {
   const lineItems: { label: string; amount: number }[] = []
   if (labor) lineItems.push({ label: "Labor", amount: labor })
   if (materials) lineItems.push({ label: "Materials", amount: materials })
-  if (subs) lineItems.push({ label: "Subcontractors", amount: subs })
+  if (subs) lineItems.push({ label: "Other / Mobilization", amount: subs })
 
   const subtotal = labor + materials + subs
 
@@ -1672,7 +1672,7 @@ function createInvoiceFromEstimate(est: EstimateHistoryItem) {
     </label>
 
     <label>
-      Subcontractors
+      Other / Mobilization
       <input
   type="number"
   value={pricing.subs === 0 ? "" : pricing.subs}

@@ -77,7 +77,7 @@ function coercePricing(p: any): Pricing {
 }
 
 function clampPricing(pricing: Pricing): Pricing {
-  const MAX_TOTAL = 250_000
+  const MAX_TOTAL = 10_000_000
 
   return {
     labor: Math.max(0, pricing.labor),
@@ -124,6 +124,135 @@ function detectIntent(scope: string): string {
   }
 
   return "Unclear — could be either"
+}
+
+function parseRoomCount(text: string): number | null {
+  const t = text.toLowerCase()
+
+  const patterns = [
+    /paint\s+(\d{1,6})\s+rooms?/i,
+    /(\d{1,6})\s+rooms?/i,
+    /rooms?\s*[:\-]\s*(\d{1,6})/i,
+    /(\d{1,6})\s+guest\s+rooms?/i,
+  ]
+
+  for (const p of patterns) {
+    const m = t.match(p)
+    if (m?.[1]) {
+      const n = Number(m[1])
+      if (Number.isFinite(n) && n > 0) return n
+    }
+  }
+  return null
+}
+
+function parseRoomDims(text: string) {
+  // 12x12 or 12 x 12
+  const m = text.toLowerCase().match(/(\d{1,3})\s*x\s*(\d{1,3})/)
+  const lengthFt = m ? Number(m[1]) : 14
+  const widthFt = m ? Number(m[2]) : 25
+
+  // 8 ft ceilings / 8' ceilings
+  const h = text.toLowerCase().match(/(\d{1,2})\s*(ft|')\s*(ceiling|ceilings|high)/)
+  const heightFt = h ? Number(h[1]) : 8.5
+
+  return { lengthFt, widthFt, heightFt }
+}
+
+function getStateAbbrev(rawState: string) {
+  const s = (rawState || "").trim()
+  const up = s.toUpperCase()
+  if (/^[A-Z]{2}$/.test(up)) return up
+
+  const map: Record<string, string> = {
+    CALIFORNIA: "CA",
+    "NEW YORK": "NY",
+    TEXAS: "TX",
+    FLORIDA: "FL",
+    WASHINGTON: "WA",
+    MASSACHUSETTS: "MA",
+    "NEW JERSEY": "NJ",
+    COLORADO: "CO",
+    ARIZONA: "AZ",
+  }
+  return map[up] || ""
+}
+
+function getStateLaborMultiplier(stateAbbrev: string) {
+  const STATE_LABOR_MULTIPLIER: Record<string, number> = {
+    AL: 0.98, AK: 1.10, AZ: 1.02, AR: 0.97, CA: 1.25, CO: 1.12, CT: 1.18,
+    DE: 1.10, FL: 1.03, GA: 1.02, HI: 1.30, ID: 1.00, IL: 1.10, IN: 1.00,
+    IA: 0.98, KS: 0.98, KY: 0.97, LA: 0.99, ME: 1.05, MD: 1.15, MA: 1.18,
+    MI: 1.03, MN: 1.04, MS: 0.96, MO: 0.99, MT: 1.00, NE: 0.99, NV: 1.08,
+    NH: 1.08, NJ: 1.20, NM: 0.98, NY: 1.22, NC: 1.01, ND: 1.00, OH: 1.00,
+    OK: 0.98, OR: 1.12, PA: 1.05, RI: 1.15, SC: 1.00, SD: 0.99, TN: 1.00,
+    TX: 1.05, UT: 1.03, VT: 1.06, VA: 1.08, WA: 1.15, WV: 0.96, WI: 1.02,
+    WY: 1.00, DC: 1.30,
+  }
+
+  return STATE_LABOR_MULTIPLIER[stateAbbrev] ?? 1
+}
+
+function pricePaintingRooms(args: {
+  scope: string
+  rooms: number
+  stateMultiplier: number
+}): Pricing {
+  const { lengthFt, widthFt, heightFt } = parseRoomDims(args.scope)
+
+  const coatsMatch = args.scope.toLowerCase().match(/(\d)\s*coats?/)
+  const coats = coatsMatch ? Math.max(1, Number(coatsMatch[1])) : 2
+
+  const includeCeilings =
+    /ceiling|ceilings/.test(args.scope.toLowerCase()) ||
+    /walls?\s*\+\s*ceilings?/.test(args.scope.toLowerCase())
+
+  const perimeter = 2 * (lengthFt + widthFt)
+  const wallArea = perimeter * heightFt
+  const ceilingArea = includeCeilings ? lengthFt * widthFt : 0
+
+  const sqftPerRoomPerCoat = wallArea + ceilingArea
+  const paintSqftPerRoom = sqftPerRoomPerCoat * coats
+
+  // ---- tunable knobs ----
+  const sqftPerLaborHour = 140
+  const laborRate = 75
+  const coverageSqftPerGallon = 325
+  const paintCostPerGallon = 28
+  const wasteFactor = 1.12
+  const patchingPerRoom = /patch|patching/.test(args.scope.toLowerCase()) ? 25 : 0
+  const consumablesPerRoom = 18
+  const markup = 25
+  const setupHoursPerRoom = 1.25
+  // -----------------------
+
+  const laborHoursTotal =
+    (paintSqftPerRoom * args.rooms) / sqftPerLaborHour +
+    setupHoursPerRoom * args.rooms
+
+  let labor = Math.round(laborHoursTotal * laborRate)
+  labor = Math.round(labor * args.stateMultiplier)
+
+  const gallonsTotal =
+    ((paintSqftPerRoom * args.rooms) / coverageSqftPerGallon) * wasteFactor
+
+  const paintCost = Math.round(gallonsTotal * paintCostPerGallon)
+  const patchCost = args.rooms * patchingPerRoom
+  const consumables = args.rooms * consumablesPerRoom
+
+  const materials = paintCost + patchCost + consumables
+
+  const mobilization = 2500
+const supervisionPct = args.rooms >= 50 ? 0.10 : 0.06
+const supervision = Math.round((labor + materials) * supervisionPct)
+
+// Put these into "subs" so UI math and saved math always match
+const subs = mobilization + supervision
+
+const base = labor + materials + subs
+const total = Math.round(base * (1 + markup / 100))
+
+return { labor, materials, subs, markup, total }
 }
 
 // -----------------------------
@@ -203,6 +332,28 @@ if (!isPaid && usageCount >= FREE_LIMIT) {
     // -----------------------------
     const trade = uiTrade || autoDetectTrade(scopeChange)
     const intentHint = detectIntent(scopeChange)
+
+    const rooms = parseRoomCount(scopeChange)
+    const stateAbbrev = getStateAbbrev(rawState)
+    const stateMultiplier = getStateLaborMultiplier(stateAbbrev)
+
+// Use deterministic pricing only when:
+// - painting
+// - room count exists and is "big"
+// - no measurements override is being used
+const looksLikePainting =
+  trade === "painting" || /(paint|painting|repaint|prime|primer)/i.test(scopeChange)
+
+const useBigJobPricing =
+  looksLikePainting &&
+  typeof rooms === "number" &&
+  rooms >= 1 &&
+  !(measurements?.totalSqft && measurements.totalSqft > 0)
+
+const bigJobPricing: Pricing | null =
+  useBigJobPricing ? pricePaintingRooms({ scope: scopeChange, rooms, stateMultiplier }) : null
+  
+  const usedBigJobPricing = Boolean(bigJobPricing)
 
     // -----------------------------
     // AI PROMPT (PRODUCTION-LOCKED)
@@ -404,6 +555,11 @@ try {
 // 🔒 Coerce AI pricing to numbers (prevents string math bugs)
 normalized.pricing = clampPricing(coercePricing(normalized.pricing))
 
+// ✅ Override pricing for large painting room jobs (hotel / multi-unit)
+if (bigJobPricing) {
+  normalized.pricing = clampPricing(bigJobPricing)
+}
+
 const allowedTypes = [
   "Change Order",
   "Estimate",
@@ -426,159 +582,88 @@ if (!allowedTypes.includes(normalized.documentType)) {
 }
 
 // -----------------------------
-// PRICING REALISM v2 (MARKET-ANCHORED)
+// PRICING REALISM (SKIP WHEN BIG-JOB PRICING IS USED)
 // -----------------------------
-const p = normalized.pricing
+if (!usedBigJobPricing) {
+  // -----------------------------
+  // PRICING REALISM v2 (MARKET-ANCHORED)
+  // -----------------------------
+  const p = normalized.pricing
 
-// ---- Markup realism (true contractor ranges) ----
-if (p.markup < 12) p.markup = 15
-if (p.markup > 30) p.markup = 25
+  // ---- Markup realism (true contractor ranges) ----
+  if (p.markup < 12) p.markup = 15
+  if (p.markup > 30) p.markup = 25
 
-// ---- Labor vs material ratios by trade ----
-switch (trade) {
-  case "painting":
-    // 65–80% labor typical
-    if (p.materials > p.labor * 0.5) {
-      p.materials = Math.round(p.labor * 0.35)
-    }
-    break
+  // ---- Labor vs material ratios by trade ----
+  switch (trade) {
+    case "painting":
+      // 65–80% labor typical
+      if (p.materials > p.labor * 0.5) {
+        p.materials = Math.round(p.labor * 0.35)
+      }
+      break
 
-  case "flooring":
-  case "tile":
-    // Materials often equal or exceed labor, but not wildly
-    if (p.materials < p.labor * 0.6) {
-      p.materials = Math.round(p.labor * 0.8)
-    }
-    if (p.materials > p.labor * 1.8) {
-      p.materials = Math.round(p.labor * 1.4)
-    }
-    break
+    case "flooring":
+    case "tile":
+      // Materials often equal or exceed labor, but not wildly
+      if (p.materials < p.labor * 0.6) {
+        p.materials = Math.round(p.labor * 0.8)
+      }
+      if (p.materials > p.labor * 1.8) {
+        p.materials = Math.round(p.labor * 1.4)
+      }
+      break
 
-  case "electrical":
-  case "plumbing":
-    // Skilled labor dominant
-    if (p.materials > p.labor * 0.75) {
-      p.materials = Math.round(p.labor * 0.5)
-    }
-    break
+    case "electrical":
+    case "plumbing":
+      // Skilled labor dominant
+      if (p.materials > p.labor * 0.75) {
+        p.materials = Math.round(p.labor * 0.5)
+      }
+      break
 
-  case "carpentry":
-  case "general renovation":
-    // Balanced trades
-    if (p.materials < p.labor * 0.4) {
-      p.materials = Math.round(p.labor * 0.6)
-    }
-    break
-}
-
-// ---- Subs realism ----
-// Subs usually appear only on larger scopes
-const base = p.labor + p.materials
-if (p.subs > base * 0.5) {
-  p.subs = Math.round(base * 0.3)
-}
-
-// ---- Total sanity (protect against AI math drift) ----
-const impliedTotal =
-  p.labor + p.materials + p.subs +
-  Math.round((p.labor + p.materials + p.subs) * (p.markup / 100))
-
-// If AI total is off by more than ±20%, snap to implied
-if (Math.abs(p.total - impliedTotal) / impliedTotal > 0.2) {
-  p.total = impliedTotal
-}
-
-// -----------------------------
-// PRICING REALISM v3 — STATE LABOR MULTIPLIER
-// -----------------------------
-
-const stateInput = (rawState || "").trim()
-
-const toAbbrev = (s: string) => {
-  const up = s.toUpperCase()
-  if (/^[A-Z]{2}$/.test(up)) return up
-
-  const map: Record<string, string> = {
-    "CALIFORNIA": "CA",
-    "NEW YORK": "NY",
-    "TEXAS": "TX",
-    "FLORIDA": "FL",
-    "WASHINGTON": "WA",
-    "MASSACHUSETTS": "MA",
-    "NEW JERSEY": "NJ",
-    "COLORADO": "CO",
-    "ARIZONA": "AZ",
+    case "carpentry":
+    case "general renovation":
+      // Balanced trades
+      if (p.materials < p.labor * 0.4) {
+        p.materials = Math.round(p.labor * 0.6)
+      }
+      break
   }
-  return map[up] || ""
+
+  // ---- Subs realism ----
+  const base = p.labor + p.materials
+  if (p.subs > base * 0.5) {
+    p.subs = Math.round(base * 0.3)
+  }
+
+  // ---- Total sanity (protect against AI math drift) ----
+  const impliedTotal =
+    p.labor + p.materials + p.subs +
+    Math.round((p.labor + p.materials + p.subs) * (p.markup / 100))
+
+  if (Math.abs(p.total - impliedTotal) / impliedTotal > 0.2) {
+    p.total = impliedTotal
+  }
+
+  // -----------------------------
+  // PRICING REALISM v3 — STATE LABOR MULTIPLIER
+  // -----------------------------
+  const stateAbbrev2 = getStateAbbrev(rawState)
+  const stateMultiplier2 = getStateLaborMultiplier(stateAbbrev2)
+
+  p.labor = Math.round(p.labor * stateMultiplier2)
+
+  p.total =
+    p.labor + p.materials + p.subs +
+    Math.round((p.labor + p.materials + p.subs) * (p.markup / 100))
+
+  normalized.pricing = clampPricing(p)
+} else {
+  // Big job pricing already includes state multiplier + total math
+  normalized.pricing = clampPricing(normalized.pricing)
 }
 
-const stateAbbrev = toAbbrev(stateInput)
-
-const STATE_LABOR_MULTIPLIER: Record<string, number> = {
-  AL: 0.98,
-  AK: 1.10,
-  AZ: 1.02,
-  AR: 0.97,
-  CA: 1.25,
-  CO: 1.12,
-  CT: 1.18,
-  DE: 1.10,
-  FL: 1.03,
-  GA: 1.02,
-  HI: 1.30,
-  ID: 1.00,
-  IL: 1.10,
-  IN: 1.00,
-  IA: 0.98,
-  KS: 0.98,
-  KY: 0.97,
-  LA: 0.99,
-  ME: 1.05,
-  MD: 1.15,
-  MA: 1.18,
-  MI: 1.03,
-  MN: 1.04,
-  MS: 0.96,
-  MO: 0.99,
-  MT: 1.00,
-  NE: 0.99,
-  NV: 1.08,
-  NH: 1.08,
-  NJ: 1.20,
-  NM: 0.98,
-  NY: 1.22,
-  NC: 1.01,
-  ND: 1.00,
-  OH: 1.00,
-  OK: 0.98,
-  OR: 1.12,
-  PA: 1.05,
-  RI: 1.15,
-  SC: 1.00,
-  SD: 0.99,
-  TN: 1.00,
-  TX: 1.05,
-  UT: 1.03,
-  VT: 1.06,
-  VA: 1.08,
-  WA: 1.15,
-  WV: 0.96,
-  WI: 1.02,
-  WY: 1.00,
-  DC: 1.30,
-}
-
-const stateMultiplier = STATE_LABOR_MULTIPLIER[stateAbbrev] ?? 1
-
-p.labor = Math.round(p.labor * stateMultiplier)
-
-// Recalculate total after labor adjustment
-p.total =
-  p.labor + p.materials + p.subs +
-  Math.round((p.labor + p.materials + p.subs) * (p.markup / 100))
- 
-  // Final clamp after all pricing adjustments
-normalized.pricing = clampPricing(p)
 const safePricing = normalized.pricing
 
     // Increment usage for free users only
