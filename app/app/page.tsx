@@ -27,6 +27,52 @@ export default function Home() {
   const totalSqft =
     Math.round(measureRows.reduce((sum, r) => sum + rowSqft(r), 0) * 10) / 10
 
+    type SavedDoc = {
+  id: string
+  createdAt: number
+  // what you already save today (adjust names if yours differ)
+  result: string
+  pricing: {
+    labor: number
+    materials: number
+    subs: number
+    markup: number
+    total: number
+  }
+  pricingAdjusted?: boolean
+  trade?: string
+  state?: string
+  jobDetails?: {
+    clientName: string
+    jobName: string
+    changeOrderNo: string
+    jobAddress: string
+    date: string
+  }
+  companyProfile?: {
+    name: string
+    address: string
+    phone: string
+    email: string
+  }
+}
+
+type Invoice = {
+  id: string
+  createdAt: number
+  fromEstimateId: string
+  invoiceNo: string
+  issueDate: string
+  dueDate: string
+  billToName: string
+  jobName: string
+  jobAddress: string
+  lineItems: { label: string; amount: number }[]
+  subtotal: number
+  total: number
+  notes: string
+}
+
   // -------------------------
 // Email (required for entitlement)
 // -------------------------
@@ -37,6 +83,41 @@ const [showUpgrade, setShowUpgrade] = useState(false)
 const EMAIL_KEY = "jobestimatepro_email"
 const COMPANY_KEY = "jobestimatepro_company"
 const JOB_KEY = "jobestimatepro_job"
+const INVOICE_KEY = "jobestimatepro_invoices"
+
+// -------------------------
+// Saved Estimate History (localStorage)
+// -------------------------
+const HISTORY_KEY = "jobestimatepro_history_v1"
+
+type EstimateHistoryItem = {
+  id: string
+  createdAt: number
+  // job context snapshot
+  jobDetails: {
+    clientName: string
+    jobName: string
+    changeOrderNo: string
+    jobAddress: string
+    date: string
+  }
+  trade: string
+  state: string
+  scopeChange: string
+
+  // generated outputs snapshot
+  result: string
+  pricing: {
+    labor: number
+    materials: number
+    subs: number
+    markup: number
+    total: number
+  }
+  pricingAdjusted: boolean
+}
+
+const [history, setHistory] = useState<EstimateHistoryItem[]>([])
 
 
 const [jobDetails, setJobDetails] = useState({
@@ -153,6 +234,18 @@ useEffect(() => {
   localStorage.setItem(JOB_KEY, JSON.stringify(jobDetails))
 }, [jobDetails])
 
+useEffect(() => {
+  const saved = localStorage.getItem(HISTORY_KEY)
+  if (saved) {
+    try {
+      const parsed = JSON.parse(saved)
+      if (Array.isArray(parsed)) setHistory(parsed)
+    } catch {
+      // ignore bad data
+    }
+  }
+}, [])
+
   // -------------------------
   // App state
   // -------------------------
@@ -171,6 +264,24 @@ useEffect(() => {
   const [pricingAdjusted, setPricingAdjusted] = useState(false)
   const [status, setStatus] = useState("")
   const [loading, setLoading] = useState(false)
+
+  const [invoices, setInvoices] = useState<Invoice[]>([])
+
+  useEffect(() => {
+  const saved = localStorage.getItem(INVOICE_KEY)
+  if (!saved) return
+
+  try {
+    const parsed = JSON.parse(saved)
+    if (Array.isArray(parsed)) setInvoices(parsed)
+  } catch (err) {
+    // ignore bad data
+  }
+}, [])
+
+useEffect(() => {
+  localStorage.setItem(INVOICE_KEY, JSON.stringify(invoices))
+}, [invoices])
   
   
   useEffect(() => {
@@ -274,11 +385,33 @@ async function generate() {
 
     const data = await res.json()
 
-    setResult(data.text || data.description || "")
-    if (data.pricing) setPricing(data.pricing)
-    if (!trade && data.trade) setTrade(data.trade)
+const nextResult = data.text || data.description || ""
+const nextPricing = data.pricing ? data.pricing : pricing
+const nextTrade = (!trade && data.trade) ? data.trade : trade
 
-    await checkEntitlementNow()
+setResult(nextResult)
+setPricing(nextPricing)
+if (!trade && data.trade) setTrade(data.trade)
+
+saveToHistory({
+  id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
+  createdAt: Date.now(),
+  jobDetails: { ...jobDetails },
+  trade: nextTrade || "",
+  state: state || "",
+  scopeChange: scopeChange || "",
+  result: nextResult,
+  pricing: {
+    labor: Number(nextPricing.labor || 0),
+    materials: Number(nextPricing.materials || 0),
+    subs: Number(nextPricing.subs || 0),
+    markup: Number(nextPricing.markup || 0),
+    total: Number(nextPricing.total || 0),
+  },
+  pricingAdjusted,
+})
+
+await checkEntitlementNow()
   } catch (err) {
     console.error(err)
     setStatus("Error generating document.")
@@ -324,6 +457,40 @@ async function upgrade() {
     console.error(err)
     setStatus("Checkout error.")
   }
+}
+
+function persistHistory(next: EstimateHistoryItem[]) {
+  setHistory(next)
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(next))
+}
+
+function saveToHistory(item: EstimateHistoryItem) {
+  // newest first, keep last 25 (you can change this)
+  const next = [item, ...history].slice(0, 25)
+  persistHistory(next)
+}
+
+function deleteHistoryItem(id: string) {
+  const next = history.filter((h) => h.id !== id)
+  persistHistory(next)
+}
+
+function clearHistory() {
+  persistHistory([])
+}
+
+function loadHistoryItem(item: EstimateHistoryItem) {
+  // restore form + outputs
+  setJobDetails(item.jobDetails)
+  setTrade(item.trade || "")
+  setState(item.state || "")
+  setScopeChange(item.scopeChange || "")
+
+  setResult(item.result || "")
+  setPricing(item.pricing)
+  setPricingAdjusted(item.pricingAdjusted)
+
+  setStatus("Loaded saved estimate from history.")
 }
 
     // -------------------------
@@ -651,6 +818,210 @@ async function upgrade() {
     win.close()
   }
 
+  function downloadInvoicePDF(inv: Invoice) {
+  const brandName = "JobEstimate Pro"
+  const companyName = companyProfile.name?.trim() || "Contractor"
+  const companyAddress = companyProfile.address?.trim() || ""
+  const companyPhone = companyProfile.phone?.trim() || ""
+  const companyEmail = companyProfile.email?.trim() || ""
+
+  const win = window.open("", "", "width=900,height=1100")
+  if (!win) {
+    setStatus("Pop-up blocked. Please allow pop-ups to download the PDF.")
+    return
+  }
+
+  const esc = (s: string) =>
+    (s || "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;")
+
+  const money = (n: number) => `$${Number(n || 0).toLocaleString()}`
+
+  const rows = inv.lineItems
+    .map(
+      (li) => `
+        <tr>
+          <td>${esc(li.label)}</td>
+          <td style="text-align:right;">${money(li.amount)}</td>
+        </tr>
+      `
+    )
+    .join("")
+
+  win.document.write(`
+    <html>
+      <head>
+        <title>${esc(brandName)} — Invoice ${esc(inv.invoiceNo)}</title>
+        <meta charset="utf-8" />
+        <style>
+          @page { margin: 22mm 18mm; }
+          body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; color: #111; }
+          .header { display:flex; justify-content:space-between; gap:16px; padding-bottom:12px; border-bottom:2px solid #111; }
+          .brand { font-size:14px; font-weight:600; color:#444; letter-spacing:0.2px; }
+          .company { text-align:right; font-size:12px; line-height:1.5; color:#222; max-width:55%; word-wrap:break-word; }
+          h1 { font-size:18px; margin:16px 0 6px; }
+          .muted { color:#555; font-size:12px; }
+          table { width:100%; border-collapse:collapse; margin-top:10px; font-size:13px; }
+          td, th { padding:10px; border-bottom:1px solid #e5e5e5; }
+          th { text-align:left; font-size:12px; color:#444; }
+          .totalRow td { font-weight:800; border-top:2px solid #111; }
+          .meta { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-top:8px; }
+          .box { margin-top:10px; padding:12px; border:1px solid #e5e5e5; border-radius:10px; font-size:12px; color:#333; }
+          .approvalsRow{ margin-top:14px; padding-top:10px; border-top:1px solid #e5e5e5; display:flex; gap:16px; }
+          .approval{ flex:1; padding:10px 12px; border:1px solid #e5e5e5; border-radius:10px; }
+          .approvalTitle{ font-size:12px; font-weight:700; margin:0 0 8px; }
+          .approvalGrid{ display:grid; grid-template-columns:1fr 0.7fr; gap:14px; align-items:end; }
+          .approvalLine{ border-top:1px solid #111; margin-top:22px; width:100%; }
+          .approvalHint{ margin-top:6px; font-size:11px; color:#333; white-space:nowrap; }
+          .footer { margin-top:22px; padding-top:10px; border-top:1px solid #eee; font-size:11px; color:#666; display:flex; justify-content:space-between; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <div>
+            <div class="brand">${esc(brandName)}</div>
+            <div class="muted">Invoice</div>
+          </div>
+          <div class="company">
+            <div style="font-weight:700; font-size:16px; color:#111;">${esc(companyName)}</div>
+            ${companyAddress ? `<div>${esc(companyAddress)}</div>` : ""}
+            ${companyPhone ? `<div>${esc(companyPhone)}</div>` : ""}
+            ${companyEmail ? `<div>${esc(companyEmail)}</div>` : ""}
+          </div>
+        </div>
+
+        <h1>Invoice <span style="font-weight:700;">${esc(inv.invoiceNo)}</span></h1>
+
+        <div class="meta muted">
+          <div>
+            <div><strong>Bill To:</strong> ${esc(inv.billToName)}</div>
+            <div><strong>Job:</strong> ${esc(inv.jobName)}</div>
+            ${inv.jobAddress ? `<div><strong>Address:</strong> ${esc(inv.jobAddress)}</div>` : ""}
+          </div>
+          <div style="text-align:right;">
+            <div><strong>Issue Date:</strong> ${esc(new Date(inv.issueDate).toLocaleDateString())}</div>
+            <div><strong>Due Date:</strong> ${esc(new Date(inv.dueDate).toLocaleDateString())}</div>
+          </div>
+        </div>
+
+        <div style="margin-top:16px;">
+          <div class="muted" style="margin-bottom:6px;">Invoice Summary</div>
+          <table>
+            <tr><th>Description</th><th style="text-align:right;">Amount</th></tr>
+            ${rows}
+            <tr class="totalRow"><td>Total Due</td><td style="text-align:right;">${money(inv.total)}</td></tr>
+          </table>
+        </div>
+
+        ${inv.notes ? `<div class="box"><strong>Notes:</strong> ${esc(inv.notes)}</div>` : ""}
+
+        <div class="approvalsRow">
+          <div class="approval">
+            <div class="approvalTitle">Contractor Approval</div>
+            <div class="approvalGrid">
+              <div>
+                <div class="approvalLine"></div>
+                <div class="approvalHint">Contractor Signature</div>
+              </div>
+              <div>
+                <div class="approvalLine"></div>
+                <div class="approvalHint">Date</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="approval">
+            <div class="approvalTitle">Customer Approval</div>
+            <div class="approvalGrid">
+              <div>
+                <div class="approvalLine"></div>
+                <div class="approvalHint">Customer Signature</div>
+              </div>
+              <div>
+                <div class="approvalLine"></div>
+                <div class="approvalHint">Date</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="footer">
+          <div>${esc(brandName)}</div>
+          <div>${esc(new Date().toLocaleDateString())}</div>
+        </div>
+      </body>
+    </html>
+  `)
+
+  win.document.close()
+  win.focus()
+  win.print()
+  win.close()
+}
+
+  function makeInvoiceNo() {
+  // simple + unique enough for now
+  const d = new Date()
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, "0")
+  const day = String(d.getDate()).padStart(2, "0")
+  const rand = Math.floor(Math.random() * 900 + 100)
+  return `INV-${y}${m}${day}-${rand}`
+}
+
+function toISODate(d: Date) {
+  // yyyy-mm-dd
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, "0")
+  const day = String(d.getDate()).padStart(2, "0")
+  return `${y}-${m}-${day}`
+}
+
+function createInvoiceFromEstimate(est: EstimateHistoryItem) {
+  const issue = new Date()
+  const due = new Date()
+  due.setDate(due.getDate() + 7) // default: 7 days
+
+  const client = est?.jobDetails?.clientName || jobDetails.clientName || "Client"
+  const jobNm = est?.jobDetails?.jobName || jobDetails.jobName || "Job"
+  const jobAddr = est?.jobDetails?.jobAddress || jobDetails.jobAddress || ""
+
+  const labor = Number(est?.pricing?.labor || 0)
+  const materials = Number(est?.pricing?.materials || 0)
+  const subs = Number(est?.pricing?.subs || 0)
+  const total = Number(est?.pricing?.total || 0)
+
+  const lineItems: { label: string; amount: number }[] = []
+  if (labor) lineItems.push({ label: "Labor", amount: labor })
+  if (materials) lineItems.push({ label: "Materials", amount: materials })
+  if (subs) lineItems.push({ label: "Subcontractors", amount: subs })
+
+  const subtotal = labor + materials + subs
+
+  const inv: Invoice = {
+    id: crypto.randomUUID(),
+    createdAt: Date.now(),
+    fromEstimateId: est.id,
+    invoiceNo: makeInvoiceNo(),
+    issueDate: toISODate(issue),
+    dueDate: toISODate(due),
+    billToName: client,
+    jobName: jobNm,
+    jobAddress: jobAddr,
+    lineItems,
+    subtotal,
+    total: total || subtotal, // if your estimate total exists, use it
+    notes: "Payment terms: Due upon approval.",
+  }
+
+  setInvoices((prev) => [inv, ...prev])
+  setStatus(`Invoice created: ${inv.invoiceNo}`)
+}
+
   // -------------------------
   // UI
   // -------------------------
@@ -865,6 +1236,74 @@ async function upgrade() {
   <option value="DC">District of Columbia</option>
 </select>
 
+{/* -------------------------
+    Invoices
+------------------------- */}
+{invoices.length > 0 && (
+  <div
+    style={{
+      marginTop: 18,
+      padding: 12,
+      border: "1px solid #e5e7eb",
+      borderRadius: 10,
+      background: "#fff",
+    }}
+  >
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+      <h3 style={{ margin: 0 }}>Invoices</h3>
+      <button
+        type="button"
+        onClick={() => setInvoices([])}
+        style={{ fontSize: 12 }}
+      >
+        Clear all
+      </button>
+    </div>
+
+    <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
+      {invoices.map((inv) => (
+        <div
+          key={inv.id}
+          style={{
+            padding: 10,
+            border: "1px solid #eee",
+            borderRadius: 10,
+            background: "#fafafa",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+            <div>
+              <div style={{ fontWeight: 700 }}>{inv.invoiceNo}</div>
+              <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>
+                {inv.billToName} • Due {new Date(inv.dueDate).toLocaleDateString()}
+              </div>
+              <div style={{ fontSize: 12, color: "#333", marginTop: 6 }}>
+                Total Due: <strong>${Number(inv.total || 0).toLocaleString()}</strong>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <button type="button" onClick={() => downloadInvoicePDF(inv)}>
+                Download Invoice PDF
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setInvoices((prev) => prev.filter((x) => x.id !== inv.id))
+                }
+                style={{ fontSize: 12 }}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      ))}
+     </div>
+  </div>
+)}
+
       <textarea
         placeholder="Describe the scope change…"
         value={scopeChange}
@@ -1065,6 +1504,84 @@ async function upgrade() {
       fontSize: 15,
     }}
   >
+
+{/* -------------------------
+    Saved History
+------------------------- */}
+{history.length > 0 && (
+  <div
+    style={{
+      marginTop: 18,
+      padding: 12,
+      border: "1px solid #e5e7eb",
+      borderRadius: 10,
+      background: "#fff",
+    }}
+  >
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+      <h3 style={{ margin: 0 }}>Saved Estimates</h3>
+      <button type="button" onClick={clearHistory} style={{ fontSize: 12 }}>
+        Clear all
+      </button>
+    </div>
+
+    <p style={{ marginTop: 6, marginBottom: 10, fontSize: 12, color: "#666" }}>
+      Click “Load” to restore an estimate and download the PDF again.
+    </p>
+
+    <div style={{ display: "grid", gap: 10 }}>
+      {history.map((h) => (
+        <div
+          key={h.id}
+          style={{
+            padding: 10,
+            border: "1px solid #eee",
+            borderRadius: 10,
+            background: "#fafafa",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+            <div>
+              <div style={{ fontWeight: 700 }}>
+                {h.jobDetails.jobName || "Untitled Job"}
+              </div>
+              <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>
+                {h.jobDetails.clientName ? `Client: ${h.jobDetails.clientName} • ` : ""}
+                {new Date(h.createdAt).toLocaleString()}
+              </div>
+              <div style={{ fontSize: 12, color: "#333", marginTop: 6 }}>
+                Total: <strong>${Number(h.pricing.total || 0).toLocaleString()}</strong>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <button type="button" onClick={() => loadHistoryItem(h)}>
+                Load
+              </button>
+
+              <button
+                type="button"
+                onClick={() => createInvoiceFromEstimate(h)}
+                style={{ fontSize: 12 }}
+              >
+                Create Invoice
+              </button>
+              
+              <button
+                type="button"
+                onClick={() => deleteHistoryItem(h.id)}
+                style={{ fontSize: 12 }}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  </div>
+)}
+
     <h3 style={{ marginBottom: 8 }}>
       Generated Change Order / Estimate
     </h3>
