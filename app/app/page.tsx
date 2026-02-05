@@ -2,10 +2,13 @@
 
 import { useEffect, useRef, useState } from "react"
 
+type PaintScope = "walls" | "walls_ceilings" | "full"
+type EffectivePaintScope = PaintScope | "doors_only"
+
 export default function Home() {
   const FREE_LIMIT = 3
   const generatingRef = useRef(false)
-
+  
   const PAINT_SCOPE_OPTIONS = [
   { label: "Walls only", value: "walls" },
   { label: "Walls + ceilings", value: "walls_ceilings" },
@@ -260,9 +263,41 @@ useEffect(() => {
   const [result, setResult] = useState("")
   const [trade, setTrade] = useState("")
   const [state, setState] = useState("")
-  const [paintScope, setPaintScope] = useState<
-  "walls" | "walls_ceilings" | "full"
->("walls")
+  const [paintScope, setPaintScope] = useState<PaintScope>("walls")
+  
+const text = scopeChange.toLowerCase()
+
+const hasPaintWord = /\b(?:paint|painting|repaint|prime|primer)\b/i.test(text)
+
+// doors, or counted doors
+const hasDoors =
+  /\b\d+\s+doors?\b/i.test(text) || /\bdoors?\b/i.test(text)
+
+// “door frames / door casing” phrases (tie it to doors)
+const hasDoorFramesOrCasing =
+  /\bdoor\s*(?:frame|frames|casing|casings|trim|jambs?)\b/i.test(text)
+
+// If user says “paint frames and casing” (no "door"), you can optionally allow it,
+// but I recommend keeping this OFF unless you want more aggressive detection:
+// const hasGenericFramesOrCasing = /\b(?:frames?|casing|casings|jambs?)\b/i.test(text)
+
+const hasWallsOrCeilings = /\b(?:walls?|ceilings?)\b/i.test(text)
+
+const hasRoomWords =
+  /\b(?:rooms?|hallway|hall|living\s*room|family\s*room|bed(?:room)?s?|kitchen|bath(?:room)?s?|dining(?:\s*room)?|office|garage|laundry|closet|stairs?|entry|foyer|mudroom)\b/i.test(
+    text
+  )
+
+const looksLikeDoorsOnly =
+  (trade === "painting" || trade === "") &&
+  hasPaintWord &&
+  (hasDoors || hasDoorFramesOrCasing) &&
+  !hasWallsOrCeilings &&
+  !hasRoomWords
+
+const effectivePaintScope: EffectivePaintScope =
+  looksLikeDoorsOnly ? "doors_only" : paintScope
+  
   const [pricing, setPricing] = useState({
     labor: 0,
     materials: 0,
@@ -363,7 +398,7 @@ async function generate() {
         scopeChange,
         trade,
         state,
-        paintScope,
+        paintScope: effectivePaintScope === "doors_only" ? "walls" : paintScope,
         measurements: measureEnabled
           ? { rows: measureRows, totalSqft, units: "ft" }
           : null,
@@ -1183,11 +1218,23 @@ function createInvoiceFromEstimate(est: EstimateHistoryItem) {
 
 {(trade === "painting" || trade === "") && (
   <div style={{ marginTop: 12 }}>
-    <p style={{ marginTop: 0, fontWeight: 600 }}>Paint Scope</p>
+    <p style={{ marginTop: 0, fontWeight: 600 }}>
+      {effectivePaintScope === "doors_only"
+        ? "Paint Scope: Doors only (auto-detected)"
+        : "Paint Scope"}
+    </p>
+
     <select
-      value={paintScope}
+      value={effectivePaintScope === "doors_only" ? "walls" : paintScope}
+      disabled={effectivePaintScope === "doors_only"}
       onChange={(e) => setPaintScope(e.target.value as any)}
-      style={{ width: "100%", padding: 10, marginTop: 6 }}
+      style={{
+        width: "100%",
+        padding: 10,
+        marginTop: 6,
+        opacity: effectivePaintScope === "doors_only" ? 0.6 : 1,
+        cursor: effectivePaintScope === "doors_only" ? "not-allowed" : "pointer",
+      }}
     >
       {PAINT_SCOPE_OPTIONS.map((opt) => (
         <option key={opt.value} value={opt.value}>
@@ -1196,9 +1243,15 @@ function createInvoiceFromEstimate(est: EstimateHistoryItem) {
       ))}
     </select>
 
-    <p style={{ fontSize: 12, color: "#666", marginTop: 6 }}>
-      This controls whether ceilings / trim / doors are included.
-    </p>
+    {effectivePaintScope === "doors_only" ? (
+      <p style={{ fontSize: 12, color: "#666", marginTop: 6 }}>
+        Scope was automatically detected as doors-only based on your description.
+      </p>
+    ) : (
+      <p style={{ fontSize: 12, color: "#666", marginTop: 6 }}>
+        This controls whether ceilings / trim / doors are included.
+      </p>
+    )}
   </div>
 )}
 
