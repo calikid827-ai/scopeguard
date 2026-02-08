@@ -53,6 +53,26 @@ type AIResponse = {
   pricing: Pricing
 }
 
+type AnchorResult = {
+  id: string
+  pricing: Pricing
+}
+
+type AnchorContext = {
+  scope: string
+  trade: string
+  stateMultiplier: number
+  measurements: any | null
+  rooms: number | null
+  doors: number | null
+}
+
+type PricingAnchor = {
+  id: string
+  when: (ctx: AnchorContext) => boolean
+  price: (ctx: AnchorContext) => Pricing | null
+}
+
 // -----------------------------
 // HELPERS
 // -----------------------------
@@ -95,7 +115,8 @@ function autoDetectTrade(scope: string): string {
 
   if (/(paint|painting|prime|primer|drywall patch|patch drywall)/.test(s))
     return "painting"
-  if (/(floor|flooring|tile|grout)/.test(s)) return "flooring"
+  if (/(floor|flooring|lvp|vinyl\s*plank|laminate|hardwood|carpet|tile\s+floor|floor\s+tile)/.test(s))
+    return "flooring"
   if (/(electrical|outlet|switch|panel|lighting)/.test(s))
     return "electrical"
   if (/(plumb|toilet|sink|faucet|shower|water line)/.test(s))
@@ -114,6 +135,497 @@ function isMixedRenovation(scope: string) {
     /\b(tile|grout|vanity|toilet|sink|faucet|shower|plumb|plumbing|electrical|outlet|switch|flooring|demo|demolition|remodel|install)\b/.test(s)
 
   return hasPaint && hasNonPaint
+}
+
+function parseSqft(text: string): number | null {
+  const m = text
+    .toLowerCase()
+    .match(/(\d{1,5})\s*(sq\s*ft|sqft|square\s*feet|sf)\b/)
+  if (!m?.[1]) return null
+  const n = Number(m[1])
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+function parseHasVanity(text: string): boolean {
+  return /\bvanity\b/.test(text.toLowerCase())
+}
+
+function parseTile(text: string): boolean {
+  return /\b(tile|porcelain|ceramic|grout)\b/.test(text.toLowerCase())
+}
+
+function parseDemo(text: string): boolean {
+  return /\b(demo|demolition|remove|tear\s*out)\b/.test(text.toLowerCase())
+}
+
+function parseBathKeyword(text: string): boolean {
+  return /\b(bath|bathroom|shower|tub)\b/.test(text.toLowerCase())
+}
+
+function parseKitchenKeyword(text: string): boolean {
+  return /\b(kitchen|cabinet|cabinets|countertop|counter top|backsplash|sink|faucet|range|cooktop|hood|appliance|dishwasher|microwave)\b/i.test(
+    text
+  )
+}
+
+function parseFlooringKeyword(text: string): boolean {
+  return /\b(floor|flooring|lvp|vinyl plank|laminate|hardwood|engineered wood|carpet|tile floor|underlayment|baseboard)\b/i.test(
+    text
+  )
+}
+
+function parseWallTileKeyword(text: string): boolean {
+  // helps prevent flooring-only anchor from triggering on shower wall tile jobs
+  return /\b(shower\s+walls?|tub\s+surround|wall\s+tile|backsplash)\b/i.test(text)
+}
+
+function parseElectricalDeviceBreakdown(text: string) {
+  const t = text.toLowerCase()
+
+  const sumMatches = (re: RegExp) => {
+    let total = 0
+    for (const m of t.matchAll(re)) {
+      const n = Number(m[1])
+      if (Number.isFinite(n) && n > 0) total += n
+    }
+    return total
+  }
+
+  // "7 outlets", "12 outlet", etc.
+  const outlets = sumMatches(/(\d{1,4})\s*(outlet|receptacle|plug)s?\b/g)
+
+  // "5 switches"
+  const switches = sumMatches(/(\d{1,4})\s*switch(es)?\b/g)
+
+  // "12 recessed lights", "8 can lights"
+  const recessed = sumMatches(/(\d{1,4})\s*(recessed|can)\s*lights?\b/g)
+
+  // "4 light fixtures", "2 sconces"
+  const fixtures = sumMatches(
+    /(\d{1,4})\s*(light\s*fixture|fixture|sconce)s?\b/g
+  )
+
+  const total = outlets + switches + recessed + fixtures
+  return total > 0 ? { outlets, switches, recessed, fixtures, total } : null
+}
+
+function priceBathroomRemodelAnchor(args: {
+  scope: string
+  stateMultiplier: number
+  measurements?: any | null
+}): Pricing | null {
+  const s = args.scope.toLowerCase()
+
+  // Trigger only when it really looks like a bathroom remodel
+  const isBath = parseBathKeyword(s)
+  const isRemodel = /\b(remodel|renovation|gut|rebuild|install)\b/.test(s)
+  if (!isBath || !isRemodel) return null
+
+  // Prefer measurements sqft; else parse; else small-bath default
+  const sqft =
+    (args.measurements?.totalSqft && args.measurements.totalSqft > 0
+      ? Number(args.measurements.totalSqft)
+      : null) ??
+    parseSqft(s) ??
+    60
+
+  const hasDemo = parseDemo(s)
+  const hasTile = parseTile(s)
+  const hasVanity = parseHasVanity(s)
+  const hasPaint = /\b(paint|painting|repaint|prime|primer)\b/.test(s)
+
+  // ---- Tunable anchors (v2) ----
+  const laborRate = 85
+  const markup = 25
+
+  const demoLaborHrs = hasDemo ? 10 : 6
+  const demoDumpFee = hasDemo ? 250 : 150
+
+  const tileLaborHrs = hasTile ? Math.max(12, sqft * 0.20) : 0
+  const tileMaterials = hasTile ? Math.max(450, sqft * 7) : 0
+
+  const vanityLaborHrs = hasVanity ? 6 : 0
+  const vanityMaterials = hasVanity ? 150 : 0
+
+  const paintLaborHrs = hasPaint ? 6 : 0
+  const paintMaterials = hasPaint ? 120 : 0
+
+  // Coordination/finish allowance for remodel
+  let laborHrs =
+    demoLaborHrs +
+    tileLaborHrs +
+    vanityLaborHrs +
+    paintLaborHrs +
+    8
+
+  let labor = Math.round(laborHrs * laborRate)
+  labor = Math.round(labor * args.stateMultiplier)
+
+  const materials = Math.round(tileMaterials + vanityMaterials + paintMaterials)
+
+  const mobilization = 350
+  const supervision = Math.round((labor + materials) * 0.08)
+  const subs = mobilization + supervision + demoDumpFee
+
+  const base = labor + materials + subs
+  const total = Math.round(base * (1 + markup / 100))
+
+  return { labor, materials, subs, markup, total }
+}
+
+function priceKitchenRefreshAnchor(args: {
+  scope: string
+  stateMultiplier: number
+  measurements?: any | null
+}): Pricing | null {
+  const s = args.scope.toLowerCase()
+
+  const isKitchen = /\bkitchen\b/.test(s) || parseKitchenKeyword(s)
+  if (!isKitchen) return null
+
+  // If it's a total gut/layout change, skip this anchor (future “kitchen_remodel” anchor)
+  const majorRemodel =
+    /\b(gut|rebuild|move\s+wall|remove\s+wall|relocat(e|ing)\s+plumb|relocat(e|ing)\s+electrical|new\s+layout|structural)\b/.test(s)
+  if (majorRemodel) return null
+
+  // Size signal (you said it will usually exist in text or measurements)
+  const sqft =
+    (args.measurements?.totalSqft && args.measurements.totalSqft > 0
+      ? Number(args.measurements.totalSqft)
+      : null) ??
+    parseSqft(s) ??
+    225
+
+  // Cabinet intent
+  const newCabinets =
+    /\b(new\s+cabinets?|install\s+cabinets?|replace\s+cabinets?)\b/.test(s)
+
+  const repaintCabinets =
+    /\b(repaint\s+cabinets?|paint\s+cabinets?|cabinet\s+repaint|refinish\s+cabinets?)\b/.test(s)
+
+  const hasBacksplash = /\b(backsplash|tile\s+backsplash)\b/.test(s)
+  const hasPaint = /\b(paint|painting|prime|primer|repaint)\b/.test(s)
+  const hasSinkFaucet = /\b(sink|faucet)\b/.test(s)
+  const hasFlooring = /\b(floor|flooring|lvp|vinyl\s+plank|laminate|hardwood|tile\s+floor)\b/.test(s)
+  const hasDemo = parseDemo(s)
+
+  // Flooring type (only if flooring is included)
+  const floorIsTile = hasFlooring && /\b(tile|porcelain|ceramic)\b/.test(s)
+  const floorIsLvp = hasFlooring && /\b(lvp|vinyl\s+plank|luxury\s+vinyl)\b/.test(s)
+  const floorIsLam = hasFlooring && /\b(laminate)\b/.test(s)
+
+  const laborRate = 95
+  const markup = 25
+
+  // ---- Labor (tunable) ----
+  let laborHrs = 0
+  laborHrs += hasDemo ? 10 : 5
+
+  // Cabinets:
+  if (newCabinets) laborHrs += 26
+  if (repaintCabinets) laborHrs += 22
+
+  // Backsplash + paint + sink
+  laborHrs += hasBacksplash ? 14 : 0
+  laborHrs += hasPaint ? 10 : 0
+  laborHrs += hasSinkFaucet ? 4 : 0
+
+  // Optional flooring in kitchen scope (use sqft)
+  if (hasFlooring) {
+    const installHrsPerSqft =
+      floorIsTile ? 0.10 :
+      (floorIsLvp || floorIsLam) ? 0.045 :
+      0.05
+
+    const demoHrsPerSqft = hasDemo ? 0.02 : 0
+    laborHrs += sqft * (installHrsPerSqft + demoHrsPerSqft)
+  }
+
+  // Minimum baseline for a “kitchen refresh” coordination
+  laborHrs = Math.max(28, laborHrs + 6)
+
+  let labor = Math.round(laborHrs * laborRate)
+  labor = Math.round(labor * args.stateMultiplier)
+
+  // ---- Materials allowances (mid-market) ----
+  let materials = 0
+
+  if (newCabinets) materials += 6500
+  if (repaintCabinets) materials += 350
+
+  if (hasBacksplash) materials += 750
+  if (hasPaint) materials += 200
+  if (hasSinkFaucet) materials += 450
+
+  if (hasFlooring) {
+    const matPerSqft =
+      floorIsTile ? 6.5 :
+      floorIsLvp ? 3.8 :
+      floorIsLam ? 3.2 :
+      4.0
+
+    const underlaymentPerSqft = floorIsTile ? 0 : 0.6
+    materials += Math.round(sqft * (matPerSqft + underlaymentPerSqft) + 180)
+  }
+
+  materials = Math.round(materials)
+
+  // ---- Subs / overhead ----
+  const mobilization = 500
+  const dumpFee = hasDemo ? 300 : 0
+  const supervision = Math.round((labor + materials) * 0.08)
+  const subs = mobilization + dumpFee + supervision
+
+  const base = labor + materials + subs
+  const total = Math.round(base * (1 + markup / 100))
+
+  return { labor, materials, subs, markup, total }
+}
+
+function priceElectricalDeviceSwapsAnchor(args: {
+  scope: string
+  stateMultiplier: number
+}): Pricing | null {
+  const s = args.scope.toLowerCase()
+
+  // Must be device-level work (not panels/rewires)
+  const isDeviceWork =
+    /\b(outlet|receptacle|switch|recessed|can\s*light|light\s*fixture|fixture|sconce|device)\b/.test(s)
+
+  const isHeavyElectrical =
+    /\b(panel|service|rewire|new\s+circuit|rough[-\s]*in|subpanel|meter|trench)\b/.test(s)
+
+  if (!isDeviceWork || isHeavyElectrical) return null
+
+  // Require explicit counts (your real-world workflow)
+  const breakdown = parseElectricalDeviceBreakdown(s)
+  if (!breakdown) return null
+
+  const laborRate = 115
+  const markup = 25
+
+  const isAddWork =
+  /\b(add|adding|install(ing)?|new\s+(circuit|run|line|home\s*run)|rough[-\s]*in)\b/.test(s)
+
+const isSwapWork =
+  /\b(replace|replacing|swap|swapping|change\s*out|remove\s+and\s+replace)\b/.test(s)
+
+// If it explicitly says swap/replace, treat as swap even if “install” appears
+const treatAsAdd = isAddWork && !isSwapWork
+
+const hrsPerOutlet = treatAsAdd ? 0.85 : 0.45
+const hrsPerSwitch = treatAsAdd ? 0.75 : 0.40
+const hrsPerRecessed = treatAsAdd ? 1.10 : 0.70
+const hrsPerFixture = treatAsAdd ? 0.95 : 0.65
+
+  const troubleshootingAllowanceHrs =
+    /\b(troubleshoot|not\s+working|diagnos)\b/.test(s) ? 1.5 : 0
+
+  const laborHrs =
+    breakdown.outlets * hrsPerOutlet +
+    breakdown.switches * hrsPerSwitch +
+    breakdown.recessed * hrsPerRecessed +
+    breakdown.fixtures * hrsPerFixture +
+    troubleshootingAllowanceHrs +
+    1.25 // setup, protection, testing
+
+  let labor = Math.round(laborHrs * laborRate)
+  labor = Math.round(labor * args.stateMultiplier)
+
+  // Materials allowance per device (mid-market, not luxury fixtures)
+  const matPerOutlet = 16
+  const matPerSwitch = 14
+  const matPerRecessed = 28
+  const matPerFixture = 22
+
+  const materials = Math.round(
+    breakdown.outlets * matPerOutlet +
+      breakdown.switches * matPerSwitch +
+      breakdown.recessed * matPerRecessed +
+      breakdown.fixtures * matPerFixture
+  )
+
+  const mobilization =
+    breakdown.total <= 6 ? 225 :
+    breakdown.total <= 15 ? 325 :
+    450
+
+  const supervision = Math.round((labor + materials) * 0.05)
+  const subs = mobilization + supervision
+
+  const base = labor + materials + subs
+  const total = Math.round(base * (1 + markup / 100))
+
+  return { labor, materials, subs, markup, total }
+}
+
+function priceFlooringOnlyAnchor(args: {
+  scope: string
+  stateMultiplier: number
+  measurements?: any | null
+}): Pricing | null {
+  const s = args.scope.toLowerCase()
+
+  // Must be flooring-ish
+  const isFlooring = parseFlooringKeyword(s)
+  if (!isFlooring) return null
+
+  // Don’t let it catch wall tile / shower surround
+  if (parseWallTileKeyword(s)) return null
+  if (parseBathKeyword(s) && /\b(shower|tub)\b/.test(s)) return null
+
+  // Sqft: prefer measurements.totalSqft, then parse, then default
+  const sqft =
+    (args.measurements?.totalSqft && args.measurements.totalSqft > 0
+      ? Number(args.measurements.totalSqft)
+      : null) ??
+    parseSqft(s) ??
+    180
+
+  // Demo signal
+  const hasDemo =
+    parseDemo(s) || /\b(remove\s+existing|tear\s*out|haul\s*away|dispose)\b/.test(s)
+
+  // Material class
+  const isTile = /\b(tile|porcelain|ceramic)\b/.test(s) && /\bfloor\b/.test(s)
+  const isHardwood = /\b(hardwood|engineered\s*wood)\b/.test(s)
+  const isLaminate = /\b(laminate)\b/.test(s)
+  const isCarpet = /\b(carpet)\b/.test(s)
+  const isLvp = /\b(lvp|vinyl\s+plank|luxury\s+vinyl)\b/.test(s)
+
+  const laborRate = 85
+  const markup = 25
+
+  // Labor hours per sqft (tunable)
+  const installHrsPerSqft =
+    isTile ? 0.12 :
+    isHardwood ? 0.09 :
+    isCarpet ? 0.06 :
+    (isLaminate || isLvp) ? 0.05 :
+    0.06
+
+  const demoHrsPerSqft = hasDemo ? 0.03 : 0
+  const baseHrs = sqft * (installHrsPerSqft + demoHrsPerSqft) + 8 // protection/transitions/cleanup
+
+  let labor = Math.round(baseHrs * laborRate)
+  labor = Math.round(labor * args.stateMultiplier)
+
+  // Materials allowance per sqft (mid-market)
+  const matPerSqft =
+    isTile ? 6.5 :
+    isHardwood ? 7.5 :
+    isCarpet ? 4.0 :
+    isLaminate ? 3.2 :
+    isLvp ? 3.8 :
+    4.0
+
+  const underlaymentPerSqft = isTile ? 0.0 : 0.6
+  const transitionAllowance = 160
+
+  const materials = Math.round(sqft * (matPerSqft + underlaymentPerSqft) + transitionAllowance)
+
+  const mobilization = 400
+  const dumpFee = hasDemo ? 300 : 0
+  const supervision = Math.round((labor + materials) * 0.06)
+  const subs = mobilization + dumpFee + supervision
+
+  const base = labor + materials + subs
+  const total = Math.round(base * (1 + markup / 100))
+
+  return { labor, materials, subs, markup, total }
+}
+
+const PRICEGUARD_ANCHORS: PricingAnchor[] = [
+  
+  // 1) Kitchen refresh (before bathroom so it doesn’t get “general renovation” collisions later)
+  {
+    id: "kitchen_refresh_v1",
+    when: (ctx) => /\bkitchen\b/i.test(ctx.scope) || parseKitchenKeyword(ctx.scope),
+    price: (ctx) =>
+      priceKitchenRefreshAnchor({
+        scope: ctx.scope,
+        stateMultiplier: ctx.stateMultiplier,
+        measurements: ctx.measurements,
+      }),
+  },
+
+  // 2) Bathroom remodel
+  {
+    id: "bathroom_remodel_v1",
+    when: (ctx) => /\b(bath|bathroom|shower|tub)\b/i.test(ctx.scope),
+    price: (ctx) =>
+      priceBathroomRemodelAnchor({
+        scope: ctx.scope,
+        stateMultiplier: ctx.stateMultiplier,
+        measurements: ctx.measurements,
+      }),
+  },
+
+  // 3) Flooring-only
+ {
+  id: "flooring_only_v1",
+  when: (ctx) => {
+  const s = ctx.scope.toLowerCase()
+
+  const isFlooring =
+    ctx.trade === "flooring" ||
+    /\b(floor|flooring|lvp|vinyl\s+plank|laminate|hardwood|carpet|tile\s+floor)\b/.test(s)
+
+  if (!isFlooring) return false
+
+  // Exclude *remodel* signals, not just the words kitchen/bath
+  const looksLikeKitchenRemodel =
+    (/\bkitchen\b/.test(s) || parseKitchenKeyword(s)) &&
+    /\b(remodel|renovation|gut|cabinets?|counter(top)?|backsplash|sink)\b/.test(s)
+
+  const looksLikeBathRemodel =
+    (/\b(bath|bathroom)\b/.test(s) || parseBathKeyword(s)) &&
+    /\b(remodel|renovation|gut|shower|tub|vanity|tile\s+walls?|surround)\b/.test(s)
+
+  return !looksLikeKitchenRemodel && !looksLikeBathRemodel
+},
+  price: (ctx) =>
+    priceFlooringOnlyAnchor({
+      scope: ctx.scope,
+      stateMultiplier: ctx.stateMultiplier,
+      measurements: ctx.measurements,
+    }),
+},
+  
+  
+  // 4) Electrical device swaps (strict, count-based)
+  {
+  id: "electrical_device_swaps_v1",
+  when: (ctx) => {
+    if (ctx.trade === "electrical") {
+  return /\b(outlet|receptacle|switch|recessed|can\s*light|fixture|sconce|device)\b/.test(ctx.scope.toLowerCase())
+}
+
+    const s = ctx.scope.toLowerCase()
+
+    const hasDeviceWords =
+      /\b(outlet|receptacle|switch|recessed|can\s*light|light\s*fixture|fixture|sconce|devices?)\b/.test(s)
+
+    const hasRemodelSignals =
+      /\b(remodel|renovation|gut|demo|tile|vanity|toilet|shower|tub|kitchen|cabinets?|counter(top)?|backsplash)\b/.test(s)
+
+    return hasDeviceWords && !hasRemodelSignals
+  },
+  price: (ctx) =>
+    priceElectricalDeviceSwapsAnchor({
+      scope: ctx.scope,
+      stateMultiplier: ctx.stateMultiplier,
+    }),
+},
+]
+
+function runPriceGuardAnchors(ctx: AnchorContext): AnchorResult | null {
+  for (const a of PRICEGUARD_ANCHORS) {
+    if (!a.when(ctx)) continue
+    const pricing = a.price(ctx)
+    if (pricing) return { id: a.id, pricing }
+  }
+  return null
 }
 
 // 🧠 Estimate vs Change Order intent hint
@@ -361,7 +873,7 @@ const paintScope: PaintScope | null =
     // BASIC VALIDATION
     // -----------------------------
     if (!email || typeof email !== "string") {
-      return NextResponse.json({ error: "Email required" }, { status: 401 })
+      return NextResponse.json({ error: "Email required" }, { status: 400 })
     }
 
     const normalizedEmail = email.trim().toLowerCase()
@@ -443,6 +955,18 @@ const stateMultiplier = getStateLaborMultiplier(stateAbbrev)
 
 // Only treat as painting when the final trade is painting
 const looksLikePainting = trade === "painting"
+
+// PriceGuard™ v2 — Orchestration table (deterministic anchors)
+const anchorHit = runPriceGuardAnchors({
+  scope: scopeChange,
+  trade,
+  stateMultiplier,
+  measurements,
+  rooms,
+  doors,
+})
+
+const anchorPricing: Pricing | null = anchorHit?.pricing ?? null
 
 const useBigJobPricing =
   looksLikePainting &&
@@ -543,9 +1067,7 @@ const doorPricing: Pricing | null =
       })()
     : null
 
-let pricingSource: "ai" | "deterministic" | "merged" = "ai"
-const usedDeterministicSafety = Boolean(bigJobPricing || doorPricing || mixedPaintPricing)
-if (usedDeterministicSafety) pricingSource = "merged"
+let pricingSource: "ai" | "merged" = "ai"
 
     // -----------------------------
     // AI PROMPT (PRODUCTION-LOCKED)
@@ -661,7 +1183,7 @@ You must choose pricing units ONLY from this list:
 Pick 1–3 units max and base labor/materials on those units.
 
 2) Choose realistic production rates (labor hours per unit) for mid-market residential work.
-3) Select a labor rate appropriate to the job state (assume typical contractor rates, not handyman rates).
+3) Use typical U.S. mid-market contractor labor rates (do NOT adjust for state/location; state multiplier is handled by the system).
 4) Set a materials allowance that matches the scope (paint/primer/trim caulk; tile/setting materials; plumbing fixtures; electrical devices).
 5) Include a reasonable mobilization/overhead amount for small jobs.
 6) Apply markup 15–25%.
@@ -669,14 +1191,13 @@ Pick 1–3 units max and base labor/materials on those units.
 
 PRICING RULES:
 - Use realistic 2024–2025 U.S. contractor pricing
-- Adjust labor rates based on job state
 - Mid-market residential work
 - Totals only (no line items)
 - Round to whole dollars
 
 MOBILIZATION MINIMUM (SMALL JOBS):
 If the job is small (e.g., <= 6 doors, <= 6 devices, <= 2 fixtures, or <= 150 sqft),
-include a mobilization/overhead minimum in "subs" of at least $150–$350 depending on the trade/state.
+include a mobilization/overhead minimum in "subs" of at least $150–$350 depending on the trade (do NOT adjust for state/location).
 
 MEASUREMENT USAGE RULE (STRICT):
 - If measurements are provided, reference the total square footage and (briefly) the labeled areas in the description.
@@ -803,7 +1324,15 @@ try {
     if (!raw) throw new Error("Empty AI response")
 
 
-    const parsed: any = JSON.parse(raw)
+    let parsed: any
+try {
+  parsed = JSON.parse(raw)
+} catch {
+  return NextResponse.json(
+    { error: "AI response was not valid JSON" },
+    { status: 500 }
+  )
+}
 
     const normalized: any = {
   documentType: parsed.documentType ?? parsed.document_type,
@@ -815,14 +1344,24 @@ try {
 // 🔒 Coerce AI pricing to numbers (prevents string math bugs)
 normalized.pricing = clampPricing(coercePricing(normalized.pricing))
 
-// ✅ Deterministic safety pricing (big rooms OR doors-only OR rooms+doors mixed)
-if (usedDeterministicSafety) {
+// ✅ Deterministic safety pricing (big rooms OR doors-only OR rooms+doors mixed OR anchor)
+let detSource: string | null = null
+
+const det: Pricing | null =
+  anchorPricing ?? bigJobPricing ?? doorPricing ?? mixedPaintPricing ?? null
+
+if (det) {
   const ai = normalized.pricing
-  const det = bigJobPricing ?? doorPricing ?? mixedPaintPricing!
 
-  const mergedMarkupRaw = Number.isFinite(ai.markup) ? ai.markup : 20
-  const mergedMarkup = Math.min(25, Math.max(15, mergedMarkupRaw))
+  detSource =
+    anchorPricing ? `anchor:${anchorHit?.id}` :
+    bigJobPricing ? "painting_big_job" :
+    doorPricing ? "painting_doors_only" :
+    mixedPaintPricing ? "painting_rooms_plus_doors" :
+    null
 
+  const aiMarkup = Number.isFinite(ai.markup) ? ai.markup : 20
+  const mergedMarkup = Math.min(25, Math.max(15, Math.max(aiMarkup, det.markup)))
 
   const merged: Pricing = {
     labor: Math.max(ai.labor, det.labor),
@@ -836,7 +1375,13 @@ if (usedDeterministicSafety) {
   merged.total = Math.round(base * (1 + merged.markup / 100))
 
   normalized.pricing = clampPricing(merged)
+  pricingSource = "merged"
+} else {
+  // No deterministic result available → keep AI
+  pricingSource = "ai"
 }
+
+const appliedDeterministicMerge = pricingSource === "merged"
 
 const allowedTypes = [
   "Change Order",
@@ -859,10 +1404,7 @@ if (!allowedTypes.includes(normalized.documentType)) {
   )
 }
 
-// -----------------------------
-// PRICING REALISM (SKIP WHEN DETERMINISTIC SAFETY PRICING WAS APPLIED)
-// -----------------------------
-if (!usedDeterministicSafety) {
+if (!appliedDeterministicMerge) {
   // -----------------------------
   // PRICING REALISM v2 (MARKET-ANCHORED)
   // -----------------------------
@@ -875,47 +1417,31 @@ if (!usedDeterministicSafety) {
   // ---- Labor vs material ratios by trade ----
   switch (trade) {
     case "painting":
-      // 65–80% labor typical
-      if (p.materials > p.labor * 0.5) {
-        p.materials = Math.round(p.labor * 0.35)
-      }
+      if (p.materials > p.labor * 0.5) p.materials = Math.round(p.labor * 0.35)
       break
 
     case "flooring":
     case "tile":
-      // Materials often equal or exceed labor, but not wildly
-      if (p.materials < p.labor * 0.6) {
-        p.materials = Math.round(p.labor * 0.8)
-      }
-      if (p.materials > p.labor * 1.8) {
-        p.materials = Math.round(p.labor * 1.4)
-      }
+      if (p.materials < p.labor * 0.6) p.materials = Math.round(p.labor * 0.8)
+      if (p.materials > p.labor * 1.8) p.materials = Math.round(p.labor * 1.4)
       break
 
     case "electrical":
     case "plumbing":
-      // Skilled labor dominant
-      if (p.materials > p.labor * 0.75) {
-        p.materials = Math.round(p.labor * 0.5)
-      }
+      if (p.materials > p.labor * 0.75) p.materials = Math.round(p.labor * 0.5)
       break
 
     case "carpentry":
     case "general renovation":
-      // Balanced trades
-      if (p.materials < p.labor * 0.4) {
-        p.materials = Math.round(p.labor * 0.6)
-      }
+      if (p.materials < p.labor * 0.4) p.materials = Math.round(p.labor * 0.6)
       break
   }
 
   // ---- Subs realism ----
   const base = p.labor + p.materials
-  if (p.subs > base * 0.5) {
-    p.subs = Math.round(base * 0.3)
-  }
+  if (p.subs > base * 0.5) p.subs = Math.round(base * 0.3)
 
-  // ---- Total sanity (protect against AI math drift) ----
+  // ---- Total sanity ----
   const impliedTotal =
     p.labor + p.materials + p.subs +
     Math.round((p.labor + p.materials + p.subs) * (p.markup / 100))
@@ -924,9 +1450,7 @@ if (!usedDeterministicSafety) {
     p.total = impliedTotal
   }
 
-  // -----------------------------
-  // PRICING REALISM v3 — STATE LABOR MULTIPLIER
-  // -----------------------------
+  // ---- State labor multiplier ----
   const stateAbbrev2 = getStateAbbrev(rawState)
   const stateMultiplier2 = getStateLaborMultiplier(stateAbbrev2)
 
@@ -938,10 +1462,9 @@ if (!usedDeterministicSafety) {
 
   normalized.pricing = clampPricing(p)
 } else {
-  // Big job pricing safety already applied (AI merged with deterministic minimums)
+  // Deterministic merge already applied — just clamp
   normalized.pricing = clampPricing(normalized.pricing)
 }
-
 const safePricing = normalized.pricing
 
     // Increment usage for free users only
@@ -954,7 +1477,6 @@ const safePricing = normalized.pricing
     .select("email")
     .maybeSingle()
 
-  // If row doesn't exist, insert
   if (!updated) {
     await supabase.from("entitlements").insert({
       email: normalizedEmail,
@@ -970,7 +1492,10 @@ return NextResponse.json({
   text: normalized.description,
   pricing: safePricing,
   pricingSource,
+  priceGuardAnchor: anchorHit?.id ?? null,
+  detSource,
 })
+
   } catch (err) {
     console.error("Generate failed:", err)
     return NextResponse.json(
