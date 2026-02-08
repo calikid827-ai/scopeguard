@@ -332,12 +332,15 @@ export async function POST(req: Request) {
     const body = await req.json()
     const measurements = body.measurements ?? null
 
-    const paintScope =
+    type PaintScope = "walls" | "walls_ceilings" | "full"
+    type EffectivePaintScope = PaintScope | "doors_only"
+
+const paintScope: PaintScope | null =
   body.paintScope === "walls" ||
   body.paintScope === "walls_ceilings" ||
   body.paintScope === "full"
     ? body.paintScope
-    : "walls"
+    : null
 
     const email = body.email
     const scopeChange = body.scopeChange
@@ -407,7 +410,10 @@ if (!isPaid && usageCount >= FREE_LIMIT) {
     // TRADE + INTENT
     // -----------------------------
     const trade = uiTrade || autoDetectTrade(scopeChange)
-    const intentHint = detectIntent(scopeChange)
+    const paintScopeForJob: PaintScope | null =
+  trade === "painting" ? paintScope : null
+
+const intentHint = detectIntent(scopeChange)
 
 // Start with raw scope
 let effectiveScopeChange = scopeChange
@@ -420,7 +426,7 @@ const stateAbbrev = getStateAbbrev(rawState)
 const stateMultiplier = getStateLaborMultiplier(stateAbbrev)
 
 const looksLikePainting =
-  trade === "painting" || /(paint|painting|repaint|prime|primer)/i.test(scopeChange)
+  trade === "painting" || paintScopeForJob !== null || /(paint|painting|repaint|prime|primer)/i.test(scopeChange)
 
 const useBigJobPricing =
   looksLikePainting &&
@@ -453,11 +459,8 @@ const useDoorPricing =
   !(measurements?.totalSqft && measurements.totalSqft > 0)
 
 // If doors-only job, paintScope is irrelevant
-type PaintScope = "walls" | "walls_ceilings" | "full"
-type EffectivePaintScope = PaintScope | "doors_only"
-
 const effectivePaintScope: EffectivePaintScope =
-  useDoorPricing ? "doors_only" : paintScope
+  useDoorPricing ? "doors_only" : (paintScopeForJob ?? "walls")
 
 // Paint scope normalization (so description matches dropdown)
 if (looksLikePainting) {
@@ -478,7 +481,7 @@ const bigJobPricing: Pricing | null =
         scope: effectiveScopeChange,
         rooms,
         stateMultiplier,
-        paintScope,
+        paintScope: (paintScopeForJob ?? "walls"),
       })
     : null
 
@@ -502,7 +505,7 @@ const doorPricing: Pricing | null =
           scope: effectiveScopeChange,
           rooms,
           stateMultiplier,
-          paintScope,
+          paintScope: (paintScopeForJob ?? "walls"),
         })
 
         const doorDet = pricePaintingDoors({
@@ -561,7 +564,7 @@ ${intentHint}
 INPUTS:
 - Trade Type: ${trade}
 - Job State: ${jobState}
-- Paint Scope: ${effectivePaintScope}
+- Paint Scope: ${looksLikePainting ? effectivePaintScope : "N/A"}
 
 SCOPE OF WORK:
 ${effectiveScopeChange}

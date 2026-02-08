@@ -49,7 +49,6 @@ export default function Home() {
     markup: number
     total: number
   }
-  pricingAdjusted?: boolean
   trade?: string
   state?: string
   jobDetails?: {
@@ -124,7 +123,6 @@ type EstimateHistoryItem = {
     markup: number
     total: number
   }
-  pricingAdjusted: boolean
   pricingSource?: PricingSource
 }
 
@@ -315,7 +313,7 @@ const effectivePaintScope: EffectivePaintScope =
   })
   
   const [pricingSource, setPricingSource] = useState<PricingSource>("ai")
-  const priceGuardVerified = pricingSource === "merged"
+  const [pricingEdited, setPricingEdited] = useState(false)
   const [showPriceGuardDetails, setShowPriceGuardDetails] = useState(false)
 
   useEffect(() => {
@@ -331,8 +329,6 @@ const effectivePaintScope: EffectivePaintScope =
   }
 }, [showPriceGuardDetails])
   
-  
-  const [pricingAdjusted, setPricingAdjusted] = useState(false)
   const [status, setStatus] = useState("")
   const [loading, setLoading] = useState(false)
 
@@ -413,9 +409,9 @@ async function generate() {
   setLoading(true)
   setStatus("") // prevents duplicate “Generating…” line
   setResult("")
-  setPricingAdjusted(false)
   setPricingSource("ai")
   setShowPriceGuardDetails(false)
+  setPricingEdited(false)
 
 const sendPaintScope =
   trade === "painting" || (trade === "" && hasPaintWord)
@@ -476,7 +472,6 @@ const nextPricingSource =
 setResult(nextResult)
 setPricing(nextPricing)
 setPricingSource(nextPricingSource)
-setPricingAdjusted(nextPricingSource === "merged")
 if (!trade && data.trade) setTrade(data.trade)
 
 
@@ -495,7 +490,6 @@ saveToHistory({
     markup: Number(nextPricing.markup || 0),
     total: Number(nextPricing.total || 0),
   },
-  pricingAdjusted: nextPricingSource === "merged",
   pricingSource: nextPricingSource,
 })
 
@@ -577,18 +571,14 @@ function loadHistoryItem(item: EstimateHistoryItem) {
   setTrade(item.trade || "")
   setState(item.state || "")
   setScopeChange(item.scopeChange || "")
-
+  setPricingEdited(false)
   setResult(item.result || "")
   setPricing(item.pricing)
 
-  // keep "Adjusted" correct for loaded item
-  setPricingAdjusted(Boolean(item.pricingAdjusted))
+  const src = (item.pricingSource ?? "ai") as PricingSource
+  setPricingSource(src)
 
-  setPricingSource(item.pricingSource ?? "ai")
-
-  // optional UX: close any open PriceGuard popup
   setShowPriceGuardDetails(false)
-
   setStatus("Loaded saved estimate from history.")
 }
 
@@ -610,6 +600,8 @@ function loadHistoryItem(item: EstimateHistoryItem) {
     const jobName = jobDetails.jobName?.trim() || ""
     const jobAddress = jobDetails.jobAddress?.trim() || ""
     const changeOrderNo = jobDetails.changeOrderNo?.trim() || ""
+
+    const priceGuardVerified = pricingSource === "merged"
 
     const win = window.open("", "", "width=900,height=1100")
     if (!win) {
@@ -825,7 +817,7 @@ function loadHistoryItem(item: EstimateHistoryItem) {
           </div>
 
           <h1>Change Order / Estimate
-  ${pricingAdjusted ? `<span class="badge">Pricing adjusted</span>` : ""}
+  ${priceGuardVerified ? `<span class="badge">PriceGuard™ Verified</span>` : ""}
 </h1>
 
 <div class="muted" style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;">
@@ -1121,13 +1113,24 @@ function createInvoiceFromEstimate(est: EstimateHistoryItem) {
   setStatus(`Invoice created: ${inv.invoiceNo}`)
 }
 
+const isUserEdited = pricingEdited === true
+const isAIOnly = pricingSource === "ai"
+const priceGuardVerified = pricingSource === "merged"
+
 function PriceGuardBadge() {
   if (!result) return null // only show after generation
 
-  const label = priceGuardVerified ? "PriceGuard™ Verified" : "AI estimate"
-  const sub = priceGuardVerified
-    ? "AI + PriceGuard safeguards applied"
-    : "PriceGuard safeguards not triggered"
+  const label = priceGuardVerified
+  ? "PriceGuard™ Verified"
+  : isUserEdited
+  ? "Edited"
+  : "AI estimate"
+
+const sub = priceGuardVerified
+  ? "AI + PriceGuard safeguards applied"
+  : isUserEdited
+  ? "Pricing manually edited by user"
+  : "PriceGuard safeguards not triggered"
 
   return (
     <span
@@ -1151,7 +1154,9 @@ function PriceGuardBadge() {
         }}
         title={sub}
       >
-        <span aria-hidden="true">{priceGuardVerified ? "✅" : "ℹ️"}</span>
+        <span aria-hidden="true">
+  {priceGuardVerified ? "✅" : isUserEdited ? "✏️" : "ℹ️"}
+</span>
         <span style={{ fontWeight: 800 }}>{label}</span>
       </button>
 
@@ -1178,24 +1183,34 @@ function PriceGuardBadge() {
           </div>
 
           <div style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5 }}>
-            <div>• ✔ Quantity scaling enforced</div>
-            <div>• ✔ Minimum charges applied</div>
-            <div>• ✔ AI math normalized / clamped</div>
+  {priceGuardVerified ? (
+    <>
+      <div>• ✔ Quantity scaling enforced</div>
+      <div>• ✔ Minimum charges applied</div>
+      <div>• ✔ AI math normalized / clamped</div>
+    </>
+  ) : (
+    <>
+      <div>• ✔ AI math normalized / clamped</div>
+      <div>• ℹ️ Quantity scaling: AI-only (not locked)</div>
+      <div>• ℹ️ Minimum charges: AI-only (not locked)</div>
+    </>
+  )}
 
-            {state ? (
-              <div>• ✔ State labor adjusted ({state})</div>
-            ) : (
-              <div>• • State not selected (national baseline)</div>
-            )}
+  {state ? (
+    <div>• ✔ State labor adjusted ({state})</div>
+  ) : (
+    <div>• • State not selected (national baseline)</div>
+  )}
 
-            {effectivePaintScope === "doors_only" && (
-              <div>• ✔ Doors-only scope detected (casing included)</div>
-            )}
+  {effectivePaintScope === "doors_only" && (
+    <div>• ✔ Doors-only scope detected (casing included)</div>
+  )}
 
-            {isMixedPaintScope && (
-              <div>• ✔ Mixed scope resolved (rooms + doors)</div>
-            )}
-          </div>
+  {isMixedPaintScope && (
+    <div>• ✔ Mixed scope resolved (rooms + doors)</div>
+  )}
+</div>
 
           <div style={{ marginTop: 10, fontSize: 12, color: "#333" }}>
             {effectivePaintScope === "doors_only" && (
@@ -1210,12 +1225,16 @@ function PriceGuardBadge() {
               </div>
             )}
 
-            {!priceGuardVerified && (
-              <div style={{ marginTop: 6 }}>
-                ⚠️ This price came from AI-only logic. Add more detail (or select
-                state / measurements) to trigger stronger safeguards.
-              </div>
-            )}
+            {isUserEdited ? (
+  <div style={{ marginTop: 6 }}>
+    ✏️ Pricing was manually edited after generation.
+  </div>
+) : !priceGuardVerified ? (
+  <div style={{ marginTop: 6 }}>
+    ⚠️ This price came from AI-only logic. Add more detail (or select
+    state / measurements) to trigger stronger safeguards.
+  </div>
+) : null}
           </div>
 
           <button
@@ -1879,19 +1898,19 @@ function PriceGuardBadge() {
 >
   Pricing (Editable)
 
-  {pricingAdjusted && (
-    <div
-      style={{
-        padding: "4px 8px",
-        fontSize: 12,
-        borderRadius: 6,
-        background: "#edf2f7",
-        color: "#4a5568",
-      }}
-    >
-      Adjusted
-    </div>
-  )}
+  {priceGuardVerified && (
+  <div
+    style={{
+      padding: "4px 8px",
+      fontSize: 12,
+      borderRadius: 6,
+      background: "#edf2f7",
+      color: "#4a5568",
+    }}
+  >
+    Verified
+  </div>
+)}
 </h3>
 
     <label>
@@ -1905,8 +1924,7 @@ function PriceGuardBadge() {
       ...pricing,
       labor: val === "" ? 0 : Number(val),
     })
-    setPricingAdjusted(true)
-    setPricingSource("merged")
+    setPricingEdited(true)
   }}
   style={{ width: "100%", padding: 8, marginBottom: 8 }}
 />
@@ -1923,8 +1941,7 @@ function PriceGuardBadge() {
       ...pricing,
       materials: val === "" ? 0 : Number(val),
     })
-    setPricingAdjusted(true)
-    setPricingSource("merged")
+    setPricingEdited(true)
   }}
   style={{ width: "100%", padding: 8, marginBottom: 8 }}
 />
@@ -1941,8 +1958,7 @@ function PriceGuardBadge() {
       ...pricing,
       subs: val === "" ? 0 : Number(val),
     })
-    setPricingAdjusted(true)
-    setPricingSource("merged")
+    setPricingEdited(true)
   }}
   style={{ width: "100%", padding: 8, marginBottom: 8 }}
 />
@@ -1959,8 +1975,7 @@ function PriceGuardBadge() {
       ...pricing,
       markup: val === "" ? 0 : Number(val),
     })
-    setPricingAdjusted(true)
-    setPricingSource("merged")
+    setPricingEdited(true)
   }}
   style={{ width: "100%", padding: 8, marginBottom: 8 }}
 />
