@@ -106,6 +106,16 @@ function autoDetectTrade(scope: string): string {
   return "general renovation"
 }
 
+function isMixedRenovation(scope: string) {
+  const s = scope.toLowerCase()
+
+  const hasPaint = /\b(paint|painting|repaint|prime|primer)\b/.test(s)
+  const hasNonPaint =
+    /\b(tile|grout|vanity|toilet|sink|faucet|shower|plumb|plumbing|electrical|outlet|switch|flooring|demo|demolition|remodel|install)\b/.test(s)
+
+  return hasPaint && hasNonPaint
+}
+
 // 🧠 Estimate vs Change Order intent hint
 function detectIntent(scope: string): string {
   const s = scope.toLowerCase()
@@ -407,10 +417,16 @@ if (!isPaid && usageCount >= FREE_LIMIT) {
     const jobState = rawState || "N/A"
 
     // -----------------------------
-    // TRADE + INTENT
-    // -----------------------------
-    const trade = uiTrade || autoDetectTrade(scopeChange)
-    const paintScopeForJob: PaintScope | null =
+// TRADE + INTENT
+// -----------------------------
+let trade = uiTrade || autoDetectTrade(scopeChange)
+
+// If scope includes paint + other renovation work, don't let it become "painting"
+if (trade === "painting" && isMixedRenovation(scopeChange)) {
+  trade = "general renovation"
+}
+
+const paintScopeForJob: PaintScope | null =
   trade === "painting" ? paintScope : null
 
 const intentHint = detectIntent(scopeChange)
@@ -425,8 +441,8 @@ const doors = parseDoorCount(scopeChange)
 const stateAbbrev = getStateAbbrev(rawState)
 const stateMultiplier = getStateLaborMultiplier(stateAbbrev)
 
-const looksLikePainting =
-  trade === "painting" || paintScopeForJob !== null || /(paint|painting|repaint|prime|primer)/i.test(scopeChange)
+// Only treat as painting when the final trade is painting
+const looksLikePainting = trade === "painting"
 
 const useBigJobPricing =
   looksLikePainting &&
