@@ -601,8 +601,6 @@ function loadHistoryItem(item: EstimateHistoryItem) {
     const jobAddress = jobDetails.jobAddress?.trim() || ""
     const changeOrderNo = jobDetails.changeOrderNo?.trim() || ""
 
-    const priceGuardVerified = pricingSource === "merged"
-
     const win = window.open("", "", "width=900,height=1100")
     if (!win) {
       setStatus("Pop-up blocked. Please allow pop-ups to download the PDF.")
@@ -618,7 +616,7 @@ function loadHistoryItem(item: EstimateHistoryItem) {
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#039;")
 
-    const safeResult = esc(result)
+    const safeResult = esc(result || "")
 
     win.document.write(`
       <html>
@@ -817,7 +815,13 @@ function loadHistoryItem(item: EstimateHistoryItem) {
           </div>
 
           <h1>Change Order / Estimate
-  ${priceGuardVerified ? `<span class="badge">PriceGuard™ Verified</span>` : ""}
+  ${
+  pdfPriceGuardVerified
+    ? `<span class="badge">PriceGuard™ Verified</span>`
+    : pdfEdited
+    ? `<span class="badge">Edited</span>`
+    : ""
+}
 </h1>
 
 <div class="muted" style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;">
@@ -850,7 +854,22 @@ function loadHistoryItem(item: EstimateHistoryItem) {
               <tr><td>Markup</td><td style="text-align:right;">${Number(pricing.markup || 0)}%</td></tr>
               <tr class="totalRow"><td>Total</td><td style="text-align:right;">$${Number(pricing.total || 0).toLocaleString()}</td></tr>
             </table>
-          </div>
+
+            ${pdfEdited ? `
+  <div class="muted" style="margin-top:8px; line-height:1.4;">
+    <strong>Edited:</strong> Pricing was updated to reflect job-specific details (site conditions, selections, or confirmed measurements).
+  </div>
+` : ""}
+
+            ${pdfPriceGuardVerified ? `
+  <div class="muted" style="margin-top:8px; line-height:1.4;">
+    <strong>PriceGuard™ Verified (Informational):</strong>
+    This estimate includes automated pricing safeguards (e.g., scope checks, quantity detection, minimums, and regional adjustments).
+    It is not a guarantee of final cost. Final pricing may change based on site conditions, selections, and confirmed measurements.
+  </div>
+` : ""}
+
+</div>
 
           <div class="approvalsRow">
   <div class="approval">
@@ -1114,8 +1133,10 @@ function createInvoiceFromEstimate(est: EstimateHistoryItem) {
 }
 
 const isUserEdited = pricingEdited === true
-const isAIOnly = pricingSource === "ai"
 const priceGuardVerified = pricingSource === "merged"
+
+const pdfPriceGuardVerified = priceGuardVerified && !isUserEdited
+const pdfEdited = isUserEdited
 
 function PriceGuardBadge() {
   if (!result) return null // only show after generation
@@ -1124,13 +1145,13 @@ function PriceGuardBadge() {
   ? "PriceGuard™ Verified"
   : isUserEdited
   ? "Edited"
-  : "AI estimate"
+  : "Estimate"
 
 const sub = priceGuardVerified
-  ? "AI + PriceGuard safeguards applied"
+  ? "Reviewed with pricing safeguards"
   : isUserEdited
-  ? "Pricing manually edited by user"
-  : "PriceGuard safeguards not triggered"
+  ? "Pricing adjusted manually"
+  : "Generated from scope provided"
 
   return (
     <span
@@ -1176,8 +1197,8 @@ const sub = priceGuardVerified
           }}
         >
           <div style={{ fontWeight: 800, fontSize: 13 }}>
-            PriceGuard™ Verification
-          </div>
+   PriceGuard™ Verification
+</div>
           <div style={{ fontSize: 12, color: "#555", marginTop: 4 }}>
             {sub}
           </div>
@@ -1185,30 +1206,30 @@ const sub = priceGuardVerified
           <div style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5 }}>
   {priceGuardVerified ? (
     <>
-      <div>• ✔ Quantity scaling enforced</div>
-      <div>• ✔ Minimum charges applied</div>
-      <div>• ✔ AI math normalized / clamped</div>
+      <div>• ✔ Scope quantities verified</div>
+      <div>• ✔ Trade minimums applied</div>
+      <div>• ✔ Common pricing risks screened</div>
     </>
   ) : (
     <>
-      <div>• ✔ AI math normalized / clamped</div>
-      <div>• ℹ️ Quantity scaling: AI-only (not locked)</div>
-      <div>• ℹ️ Minimum charges: AI-only (not locked)</div>
+      <div>• ℹ️ Pricing generated from the scope provided</div>
+      <div>• ✔ Standard checks applied</div>
+      <div>• ℹ️ Add more detail (or measurements) for stronger verification</div>
     </>
   )}
 
   {state ? (
-    <div>• ✔ State labor adjusted ({state})</div>
+    <div>• ✔ Regional labor rates adjusted ({state})</div>
   ) : (
-    <div>• • State not selected (national baseline)</div>
+    <div>• ℹ️ Regional labor rates: national baseline</div>
   )}
 
   {effectivePaintScope === "doors_only" && (
-    <div>• ✔ Doors-only scope detected (casing included)</div>
+    <div>• ✔ Doors-only scope detected (includes casing/frames)</div>
   )}
 
   {isMixedPaintScope && (
-    <div>• ✔ Mixed scope resolved (rooms + doors)</div>
+    <div>• ✔ Mixed scope detected (rooms + doors)</div>
   )}
 </div>
 
@@ -1231,8 +1252,8 @@ const sub = priceGuardVerified
   </div>
 ) : !priceGuardVerified ? (
   <div style={{ marginTop: 6 }}>
-    ⚠️ This price came from AI-only logic. Add more detail (or select
-    state / measurements) to trigger stronger safeguards.
+    ℹ️ Tip: add quantities, measurements, and the job state for a more
+    precise verified price.
   </div>
 ) : null}
           </div>
@@ -1896,22 +1917,29 @@ const sub = priceGuardVerified
     gap: 8,
   }}
 >
-  Pricing (Editable)
+    Pricing (Adjustable)
 
   {priceGuardVerified && (
   <div
     style={{
       padding: "4px 8px",
       fontSize: 12,
-      borderRadius: 6,
-      background: "#edf2f7",
-      color: "#4a5568",
+      borderRadius: 999,
+      background: "#ecfdf5",
+      border: "1px solid #a7f3d0",
+      color: "#065f46",
+      fontWeight: 700,
+      lineHeight: 1,
     }}
   >
-    Verified
+    PriceGuard™ Verified
   </div>
 )}
 </h3>
+
+<p style={{ marginTop: -6, marginBottom: 10, fontSize: 12, color: "#666" }}>
+  Adjust as needed for site conditions, selections, or confirmed measurements.
+</p>
 
     <label>
       Labor
