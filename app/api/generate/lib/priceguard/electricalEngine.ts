@@ -60,12 +60,45 @@ function sumMatches(text: string, re: RegExp): number {
 function parseElectricalDeviceBreakdown(scopeText: string) {
   const t = scopeText.toLowerCase()
 
-  const outlets = sumMatches(t, /(\d{1,4})\s*(outlet|receptacle|plug)s?\b/g)
-  const switches = sumMatches(t, /(\d{1,4})\s*switch(es)?\b/g)
-  const recessed = sumMatches(t, /(\d{1,4})\s*(recessed|can)\s*lights?\b/g)
-  const fixtures = sumMatches(
-    t,
-    /(\d{1,4})\s*(light\s*fixture|fixture|sconce|ceiling\s*fan|fan)\s*s?\b/g
+  const sumMatchesLocal = (re: RegExp) => {
+    let total = 0
+    for (const m of t.matchAll(re)) {
+      const n = Number(m[1])
+      if (Number.isFinite(n) && n > 0) total += n
+    }
+    return total
+  }
+
+  // allow optional adjectives like "new", "existing", "dedicated" between number and noun
+  const mid = String.raw`(?:\s+\w+){0,2}\s+`
+
+  const outlets = sumMatchesLocal(
+    new RegExp(String.raw`(\d{1,4})${mid}(outlet|receptacle|plug)s?\b`, "g")
+  )
+
+  const switches = sumMatchesLocal(
+    new RegExp(String.raw`(\d{1,4})${mid}switch(es)?\b`, "g")
+  )
+
+  // matches:
+  // "4 recessed can lights"
+  // "4 new recessed can lights"
+  // "4 can lights"
+  // "4 new can lights"
+  // "4 recessed lights"
+  const recessed = sumMatchesLocal(
+    new RegExp(
+      String.raw`(\d{1,4})${mid}(?:recessed(?:\s+can)?|can)\s+lights?\b`,
+      "g"
+    )
+  )
+
+  // fixtures/fans
+  const fixtures = sumMatchesLocal(
+    new RegExp(
+      String.raw`(\d{1,4})${mid}(light\s*fixture|fixture|sconce|ceiling\s*fan|fan)s?\b`,
+      "g"
+    )
   )
 
   const total = outlets + switches + recessed + fixtures
@@ -171,6 +204,7 @@ export function computeElectricalDeterministic(args: {
   const heavy = isHeavyElectrical(scope)
 
   const devices = parseElectricalDeviceBreakdown(scope)
+  console.log("PG ELECTRICAL DEVICES PARSED", { scope, devices })
   const dedicatedCircuits = parseDedicatedCircuits(scope)
   const panelCount = parsePanelCount(scope)
   const evChargerCount = parseEvChargerCount(scope)

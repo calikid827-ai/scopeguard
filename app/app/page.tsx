@@ -99,6 +99,27 @@ const INVOICE_KEY = "jobestimatepro_invoices"
 // -------------------------
 const HISTORY_KEY = "jobestimatepro_history_v1"
 type PricingSource = "ai" | "deterministic" | "merged"
+
+type PriceGuardStatus = "verified" | "deterministic" | "adjusted" | "review" | "ai"
+
+type PriceGuardReport = {
+  status: PriceGuardStatus
+  confidence: number
+  pricingSource: PricingSource
+  appliedRules: string[]
+  assumptions: string[]
+  warnings: string[]
+  details: {
+    stateAdjusted: boolean
+    stateAbbrev?: string
+    rooms?: number | null
+    doors?: number | null
+    paintScope?: string | null
+    anchorId?: string | null
+    detSource?: string | null
+  }
+}
+
 type EstimateHistoryItem = {
   id: string
   createdAt: number
@@ -316,7 +337,7 @@ const effectivePaintScope: EffectivePaintScope =
   const [pricingSource, setPricingSource] = useState<PricingSource>("ai")
   const [pricingEdited, setPricingEdited] = useState(false)
   const [showPriceGuardDetails, setShowPriceGuardDetails] = useState(false)
-
+  const [priceGuard, setPriceGuard] = useState<PriceGuardReport | null>(null)
   const [priceGuardVerified, setPriceGuardVerified] = useState(false)
 
   useEffect(() => {
@@ -414,6 +435,7 @@ async function generate() {
   setResult("")
   setPricingSource("ai")
   setShowPriceGuardDetails(false)
+  setPriceGuard(null)
   setPricingEdited(false)
   setPriceGuardVerified(false)
 
@@ -469,6 +491,7 @@ const paintScopeToSend = sendPaintScope
 
     const nextVerified = data?.priceGuardVerified === true
 setPriceGuardVerified(nextVerified)
+setPriceGuard(data?.priceGuard ?? null)
 
 const nextResult = data.text || data.description || ""
 const nextPricing = data.pricing ? data.pricing : pricing
@@ -824,11 +847,11 @@ function loadHistoryItem(item: EstimateHistoryItem) {
 
           <h1>Change Order / Estimate
   ${
-  pdfPriceGuardVerified
-    ? `<span class="badge">PriceGuard™ Verified</span>`
-    : pdfEdited
-    ? `<span class="badge">Edited</span>`
-    : ""
+  pdfShowPriceGuard
+  ? `<span class="badge">${esc(pdfPriceGuardLabel)}</span>`
+  : pdfEdited
+  ? `<span class="badge">Edited</span>`
+  : ""
 }
 </h1>
 
@@ -869,9 +892,9 @@ function loadHistoryItem(item: EstimateHistoryItem) {
   </div>
 ` : ""}
 
-            ${pdfPriceGuardVerified ? `
+            ${pdfShowPriceGuard ? `
   <div class="muted" style="margin-top:8px; line-height:1.4;">
-    <strong>PriceGuard™ Verified (Informational):</strong>
+    <strong>${esc(pdfPriceGuardLabel)} (Informational):</strong>
     This estimate includes automated pricing safeguards (e.g., scope checks, quantity detection, minimums, and regional adjustments).
     It is not a guarantee of final cost. Final pricing may change based on site conditions, selections, and confirmed measurements.
   </div>
@@ -1142,27 +1165,46 @@ function createInvoiceFromEstimate(est: EstimateHistoryItem) {
 
 const isUserEdited = pricingEdited === true
 
-const pdfPriceGuardVerified = priceGuardVerified && !isUserEdited
+const displayedConfidence = (() => {
+  const base = priceGuard?.confidence ?? null
+  if (base == null) return null
+  if (!pricingEdited) return base
+  return Math.max(0, Math.min(99, base - 20))
+})()
+
+const pdfShowPriceGuard =
+  !isUserEdited &&
+  (priceGuard?.status === "verified" ||
+   priceGuard?.status === "adjusted" ||
+   priceGuard?.status === "deterministic")
 const pdfEdited = isUserEdited
+
+const pdfPriceGuardLabel =
+  priceGuard?.status === "verified" ? "PriceGuard™ Verified" :
+  priceGuard?.status === "adjusted" ? "PriceGuard™ Adjusted" :
+  priceGuard?.status === "deterministic" ? "PriceGuard™ Deterministic" :
+  "PriceGuard™"
 
 function PriceGuardBadge() {
   if (!result) return null // only show after generation
 
-  const label = isUserEdited
-  ? "Edited"
-  : priceGuardVerified
-  ? "PriceGuard™ Verified"
-  : pricingSource === "deterministic"
-  ? "PriceGuard™ Deterministic"
-  : "Estimate"
+  const pgStatus = priceGuard?.status ?? (priceGuardVerified ? "verified" : "ai")
 
-const sub = isUserEdited
-  ? "Pricing adjusted manually"
-  : priceGuardVerified
-  ? "Reviewed with pricing safeguards"
-  : pricingSource === "deterministic"
-  ? "Deterministic engine applied (not fully verified)"
-  : "Generated from scope provided"
+  const label =
+  pricingEdited ? "PriceGuard™ Override" :
+  pgStatus === "verified" ? "PriceGuard™ Verified" :
+  pgStatus === "adjusted" ? "PriceGuard™ Adjusted" :
+  pgStatus === "deterministic" ? "PriceGuard™ Deterministic" :
+  pgStatus === "review" ? "Review Recommended" :
+  "AI Estimate"
+
+const sub =
+  pricingEdited ? "Pricing adjusted manually" :
+  pgStatus === "verified" ? "Pricing validated by deterministic safeguards" :
+  pgStatus === "adjusted" ? "AI pricing lifted to deterministic safety floors" :
+  pgStatus === "deterministic" ? "Deterministic pricing engine applied" :
+  pgStatus === "review" ? "Some details were inferred — review recommended" :
+  "Pricing relied primarily on AI — add quantities for stronger protection"
 
   return (
     <span
@@ -1174,7 +1216,13 @@ const sub = isUserEdited
         onClick={() => setShowPriceGuardDetails((v) => !v)}
         style={{
           border: "1px solid #e5e7eb",
-          background: priceGuardVerified ? "#ecfdf5" : "#f3f4f6",
+          background:
+  pricingEdited ? "#f3f4f6" :
+  pgStatus === "verified" ? "#ecfdf5" :
+  pgStatus === "adjusted" ? "#fffbeb" :
+  pgStatus === "deterministic" ? "#eef2ff" :
+  pgStatus === "review" ? "#fff7ed" :
+  "#f3f4f6",
           color: "#111",
           padding: "6px 10px",
           borderRadius: 999,
@@ -1192,6 +1240,12 @@ const sub = isUserEdited
 </span>
 
         <span style={{ fontWeight: 800 }}>{label}</span>
+
+        {displayedConfidence != null && (
+  <span style={{ fontWeight: 700, color: "#444" }}>
+    {displayedConfidence}%
+  </span>
+)}
       </button>
 
       {showPriceGuardDetails && (
@@ -1932,7 +1986,7 @@ const sub = isUserEdited
 >
     Pricing (Adjustable)
 
-  {priceGuardVerified && !isUserEdited && (
+  {pdfShowPriceGuard && !isUserEdited && (
   <div
     style={{
       padding: "4px 8px",
@@ -1945,7 +1999,7 @@ const sub = isUserEdited
       lineHeight: 1,
     }}
   >
-    PriceGuard™ Verified
+    {pdfPriceGuardLabel}
   </div>
 )}
 </h3>

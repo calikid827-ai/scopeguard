@@ -9,7 +9,6 @@ import {
   hasHeavyPlumbingSignals,
   parsePlumbingFixtureBreakdown,
 } from "./lib/priceguard/plumbingEngine"
-import { computeBathroomPlumbingRoughInDeterministic } from "./lib/priceguard/bathroomPlumbingRoughInEngine"
 
 export const dynamic = "force-dynamic"
 export const runtime = "nodejs"
@@ -53,6 +52,130 @@ type Pricing = {
   subs: number
   markup: number
   total: number
+}
+
+type PriceGuardStatus =
+  | "verified"
+  | "deterministic"
+  | "adjusted"
+  | "review"
+  | "ai"
+
+type PriceGuardReport = {
+  status: PriceGuardStatus
+  confidence: number // 0–99
+  pricingSource: "ai" | "deterministic" | "merged"
+  appliedRules: string[]
+  assumptions: string[]
+  warnings: string[]
+  details: {
+    stateAdjusted: boolean
+    stateAbbrev?: string
+    rooms?: number | null
+    doors?: number | null
+    paintScope?: string | null
+    anchorId?: string | null
+    detSource?: string | null
+  }
+}
+
+function clampConfidence(n: number) {
+  const x = Math.round(n)
+  return Math.max(0, Math.min(99, x))
+}
+
+function buildPriceGuardReport(args: {
+  pricingSource: "ai" | "deterministic" | "merged"
+  priceGuardVerified: boolean
+  stateAbbrev: string
+  rooms: number | null
+  doors: number | null
+  measurements: any | null
+  effectivePaintScope: string | null
+  anchorId: string | null
+  detSource: string | null
+  usedNationalBaseline: boolean
+}): PriceGuardReport {
+  const appliedRules: string[] = []
+  const assumptions: string[] = []
+  const warnings: string[] = []
+
+  let score = 100
+
+  const stateAdjusted = !args.usedNationalBaseline && !!args.stateAbbrev
+
+  if (args.pricingSource === "deterministic") {
+    appliedRules.push("Deterministic pricing engine applied")
+    score -= args.priceGuardVerified ? 2 : 8
+  } else if (args.pricingSource === "merged") {
+    appliedRules.push("PriceGuard safety floor enforced (AI merged with deterministic)")
+    score -= 10
+  } else {
+    score -= 40
+    warnings.push("Pricing relied primarily on AI due to scope ambiguity or missing quantities.")
+  }
+
+  if (!stateAdjusted) {
+    score -= 10
+    assumptions.push("State not selected — used national baseline labor rates.")
+  } else {
+    appliedRules.push("State labor adjustment applied")
+  }
+
+  const hasDoors = typeof args.doors === "number" && args.doors > 0
+  const hasRooms = typeof args.rooms === "number" && args.rooms > 0
+  const hasMeas = !!(args.measurements?.totalSqft && args.measurements.totalSqft > 0)
+
+  if (hasDoors) appliedRules.push("Door quantity detected")
+  if (hasRooms) appliedRules.push("Room quantity detected")
+  if (hasMeas) appliedRules.push("User measurements used")
+
+  if (args.pricingSource === "ai" && !hasDoors && !hasRooms && !hasMeas) {
+    score -= 30
+    warnings.push("No explicit quantities detected (doors/rooms/sqft). Add quantities for stronger pricing protection.")
+  }
+
+  if (args.effectivePaintScope === "doors_only") {
+    appliedRules.push("Doors-only scope classification enforced")
+    score += 4
+  }
+  if (hasDoors && hasRooms) {
+    appliedRules.push("Mixed scope resolved deterministically (rooms + doors)")
+    score += 4
+  }
+
+  if (args.anchorId) {
+    appliedRules.push(`Pricing anchor applied: ${args.anchorId}`)
+    score += 6
+  }
+
+  if (hasMeas) score += 6
+
+  score = clampConfidence(score)
+
+  let status: PriceGuardStatus = "ai"
+  if (args.priceGuardVerified && args.pricingSource === "deterministic") status = "verified"
+  else if (args.pricingSource === "deterministic") status = "deterministic"
+  else if (args.pricingSource === "merged") status = "adjusted"
+  else status = score >= 70 ? "review" : "ai"
+
+  return {
+    status,
+    confidence: score,
+    pricingSource: args.pricingSource,
+    appliedRules,
+    assumptions,
+    warnings,
+    details: {
+      stateAdjusted,
+      stateAbbrev: args.stateAbbrev || undefined,
+      rooms: args.rooms,
+      doors: args.doors,
+      paintScope: args.effectivePaintScope,
+      anchorId: args.anchorId,
+      detSource: args.detSource,
+    },
+  }
 }
 
 type AIResponse = {
@@ -200,18 +323,18 @@ function parseElectricalDeviceBreakdown(text: string) {
     return total
   }
 
-  // "7 outlets", "12 outlet", etc.
-  const outlets = sumMatches(/(\d{1,4})\s*(outlet|receptacle|plug)s?\b/g)
+  // Allow up to 2 words between number and the thing
+  // e.g. "2 new outlets", "4 existing switches", "6 gfci outlets"
+  const outlets = sumMatches(/(\d{1,4})\s+(?:\w+\s+){0,2}(outlet|receptacle|plug)s?\b/g)
+  const switches = sumMatches(/(\d{1,4})\s+(?:\w+\s+){0,2}switch(es)?\b/g)
 
-  // "5 switches"
-  const switches = sumMatches(/(\d{1,4})\s*switch(es)?\b/g)
+  // e.g. "4 new recessed can lights", "6 can lights", "8 recessed lights"
+  const recessed = sumMatches(
+    /(\d{1,4})\s+(?:\w+\s+){0,2}(recessed|can)\s+lights?\b/g
+  )
 
-  // "12 recessed lights", "8 can lights"
-  const recessed = sumMatches(/(\d{1,4})\s*(recessed|can)\s*lights?\b/g)
-
-  // "4 light fixtures", "2 sconces"
   const fixtures = sumMatches(
-    /(\d{1,4})\s*(light\s*fixture|fixture|sconce)s?\b/g
+    /(\d{1,4})\s+(?:\w+\s+){0,2}(light\s*fixture|fixture|sconce)s?\b/g
   )
 
   const total = outlets + switches + recessed + fixtures
@@ -736,7 +859,6 @@ const PRICEGUARD_ANCHORS: PricingAnchor[] = [
   {
   id: "electrical_device_swaps_v1",
   when: (ctx) => {
-    if (ctx.trade === "electrical") return false
 
     const s = ctx.scope.toLowerCase()
 
@@ -810,9 +932,14 @@ function parseDoorCount(text: string): number | null {
   const t = text.toLowerCase()
 
   const patterns = [
-    /paint\s+(\d{1,4})\s+doors?/i,
-    /(\d{1,4})\s+doors?/i,
-    /doors?\s*[:\-]\s*(\d{1,4})/i,
+    // paint 12 doors / paint 12 interior doors / paint 12 prehung interior doors
+    /paint\s+(\d{1,4})\s+(?:\w+\s+){0,2}doors?\b/i,
+
+    // 12 doors / 12 interior doors / 12 prehung interior doors
+    /(\d{1,4})\s+(?:\w+\s+){0,2}doors?\b/i,
+
+    // doors: 12 / doors - 12
+    /doors?\s*[:\-]\s*(\d{1,4})\b/i,
   ]
 
   for (const p of patterns) {
@@ -1003,7 +1130,7 @@ const paintScope: PaintScope | null =
 
     const email = body.email
     const scopeChange = body.scopeChange
-    const uiTrade = typeof body.trade === "string" ? body.trade.trim() : ""
+    const uiTrade = typeof body.trade === "string" ? body.trade.trim().toLowerCase() : ""
     const rawState = typeof body.state === "string" ? body.state.trim() : ""
 
     // -----------------------------
@@ -1058,8 +1185,6 @@ if (!isPaid && usageCount >= FREE_LIMIT) {
   )
 }
 
-   
-
     // -----------------------------
     // STATE NORMALIZATION
     // -----------------------------
@@ -1069,6 +1194,7 @@ if (!isPaid && usageCount >= FREE_LIMIT) {
 // TRADE + INTENT
 // -----------------------------
 let trade = uiTrade || autoDetectTrade(scopeChange)
+trade = trade.trim().toLowerCase()
 
 // If scope includes paint + other renovation work, don't let it become "painting"
 if (trade === "painting" && isMixedRenovation(scopeChange)) {
@@ -1117,6 +1243,8 @@ const electricalDet =
       })
     : null
 
+    console.log("PG ELECTRICAL DET", electricalDet)
+
 const electricalDetPricing: Pricing | null =
   electricalDet?.okForDeterministic
     ? clampPricing(coercePricing(electricalDet.pricing))
@@ -1135,30 +1263,34 @@ const plumbingDet =
     ? clampPricing(coercePricing(plumbingDet.pricing))
     : null
 
-    // Bathroom plumbing rough-in deterministic engine (PriceGuard™)
-const bathPlumbingRoughInDet =
-  computeBathroomPlumbingRoughInDeterministic({
-    scopeText: scopeChange,
-    stateMultiplier,
-  })
-
-const bathPlumbingRoughInPricing: Pricing | null =
-  bathPlumbingRoughInDet?.okForDeterministic
-    ? clampPricing(coercePricing(bathPlumbingRoughInDet.pricing))
-    : null
+    
+   
+  console.log("PG FLAGS", {
+  trade,
+  electrical_ok: electricalDet?.okForDeterministic,
+  plumbing_ok: plumbingDet?.okForDeterministic,
+  plumbing_type: plumbingDet?.jobType,
+})
 
 // Only treat as painting when the final trade is painting
 const looksLikePainting = trade === "painting"
 
-// PriceGuard™ v2 — Orchestration table (deterministic anchors)
-const anchorHit = runPriceGuardAnchors({
-  scope: scopeChange,
-  trade,
-  stateMultiplier,
-  measurements,
-  rooms,
-  doors,
-})
+// PriceGuard™ v2 — Orchestration table (anchors only for non-deterministic trades)
+const anchorHit =
+  trade === "electrical" ||
+  trade === "plumbing" ||
+  trade === "flooring"
+    ? null
+    : runPriceGuardAnchors({
+        scope: scopeChange,
+        trade,
+        stateMultiplier,
+        measurements,
+        rooms,
+        doors,
+      })
+
+console.log("PG ANCHOR", { hit: anchorHit?.id ?? null })
 
 const anchorPricing: Pricing | null = anchorHit?.pricing ?? null
 
@@ -1195,6 +1327,18 @@ const useDoorPricing =
 // If doors-only job, paintScope is irrelevant
 const effectivePaintScope: EffectivePaintScope =
   useDoorPricing ? "doors_only" : (paintScopeForJob ?? "walls")
+
+  console.log("PG PARSE", {
+  trade,
+  stateAbbrev,
+  paintScopeFromUI: paintScopeForJob,
+  rooms,
+  doors,
+  looksLikePainting,
+  doorsOnlyIntent,
+  effectivePaintScope,
+  scope: scopeChange,
+})
 
 // Paint scope normalization (so description matches dropdown)
 if (looksLikePainting) {
@@ -1536,57 +1680,124 @@ try {
 // 🔒 Coerce AI pricing to numbers (prevents string math bugs)
 normalized.pricing = clampPricing(coercePricing(normalized.pricing))
 
-// -----------------------------
-// PriceGuard™ flags (server is source of truth)
-// -----------------------------
+// Start from AI as default
 let pricingSource: "ai" | "deterministic" | "merged" = "ai"
-let priceGuardVerified = false // merged = Protected, not Verified
-
+let priceGuardVerified = false
 let pricingFinal: Pricing = normalized.pricing
 let detSource: string | null = null
 
-// ✅ Flooring: deterministic engine should OWN pricing (not merged with AI)
-if (trade === "flooring" && flooringDetPricing) {
-  pricingFinal = flooringDetPricing
+function applyDeterministicOwnership(args: {
+  pricing: Pricing | null
+  okForVerified?: boolean
+  sourceVerifiedId: string
+  sourceId: string
+}) {
+  if (!args.pricing) return false
+
+  pricingFinal = clampPricing(coercePricing(args.pricing))
   pricingSource = "deterministic"
-  detSource = flooringDet?.okForVerified
-    ? "flooring_engine_v1_verified"
-    : "flooring_engine_v1"
-  priceGuardVerified = !!flooringDet?.okForVerified
+  detSource = args.okForVerified ? args.sourceVerifiedId : args.sourceId
+  priceGuardVerified = !!args.okForVerified
+  return true
 }
 
-// ✅ Electrical: deterministic engine should OWN pricing (not merged with AI)
-if (trade === "electrical" && electricalDetPricing) {
-  pricingFinal = electricalDetPricing
-  pricingSource = "deterministic"
-  detSource = electricalDet?.okForVerified
-    ? "electrical_engine_v1_verified"
-    : "electrical_engine_v1"
-  priceGuardVerified = !!electricalDet?.okForVerified
-}
+// 1–3) Deterministic ownership checks (use a boolean flag TS can understand)
+const deterministicOwned =
+  (trade === "flooring" &&
+    applyDeterministicOwnership({
+      pricing: flooringDetPricing,
+      okForVerified: !!flooringDet?.okForVerified,
+      sourceVerifiedId: "flooring_engine_v1_verified",
+      sourceId: "flooring_engine_v1",
+    })) ||
+  (trade === "electrical" &&
+    applyDeterministicOwnership({
+      pricing: electricalDetPricing,
+      okForVerified: !!electricalDet?.okForVerified,
+      sourceVerifiedId: "electrical_engine_v1_verified",
+      sourceId: "electrical_engine_v1",
+    })) ||
+  (trade === "plumbing" &&
+    applyDeterministicOwnership({
+      pricing: plumbingDetPricing,
+      okForVerified: !!plumbingDet?.okForVerified,
+      sourceVerifiedId: "plumbing_engine_v1_verified",
+      sourceId: "plumbing_engine_v1",
+    }))
+  
+if (deterministicOwned) {
+  const safePricing = clampPricing(pricingFinal)
+  const priceGuardProtected = true
 
-if (trade === "plumbing" && plumbingDetPricing) {
-  pricingFinal = plumbingDetPricing
-  pricingSource = "deterministic"
-  detSource = plumbingDet?.okForVerified
-    ? "plumbing_engine_v1_verified"
-    : "plumbing_engine_v1"
-  priceGuardVerified = !!plumbingDet?.okForVerified
-}
+  normalized.trade = trade
 
-// ✅ Bathroom plumbing rough-in: deterministic should OWN pricing (even if trade isn't "plumbing")
-if (pricingSource !== "deterministic" && bathPlumbingRoughInPricing) {
-  pricingFinal = bathPlumbingRoughInPricing
-  pricingSource = "deterministic"
-  detSource = bathPlumbingRoughInDet?.okForVerified
-    ? "bath_plumbing_rough_in_v1_verified"
-    : "bath_plumbing_rough_in_v1"
-  priceGuardVerified = !!bathPlumbingRoughInDet?.okForVerified
-}
+  const usedNationalBaseline = !getStateAbbrev(rawState)
 
-// ✅ Deterministic safety pricing (big rooms OR doors-only OR rooms+doors mixed OR anchor)
-// (Skip if a deterministic engine already applied above)
-if (pricingSource !== "deterministic") {
+const pg = buildPriceGuardReport({
+  pricingSource,
+  priceGuardVerified,
+  stateAbbrev,
+  rooms,
+  doors,
+  measurements,
+  effectivePaintScope: looksLikePainting ? effectivePaintScope : null,
+  anchorId: anchorHit?.id ?? null,
+  detSource,
+  usedNationalBaseline,
+})
+
+  return NextResponse.json({
+    documentType: normalized.documentType,
+    trade: normalized.trade || trade,
+    text: normalized.description,
+    pricing: safePricing,
+
+    pricingSource,
+    detSource,
+    priceGuardAnchor: anchorHit?.id ?? null,
+    priceGuardVerified,
+    priceGuardProtected,
+    priceGuard: pg,
+
+    flooring: flooringDet
+      ? {
+          okForDeterministic: flooringDet.okForDeterministic,
+          okForVerified: flooringDet.okForVerified,
+          flooringType: flooringDet.flooringType,
+          sqft: flooringDet.sqft,
+          notes: flooringDet.notes,
+        }
+      : null,
+
+    electrical: electricalDet
+      ? {
+          okForDeterministic: electricalDet.okForDeterministic,
+          okForVerified: electricalDet.okForVerified,
+          jobType: electricalDet.jobType,
+          signals: electricalDet.signals ?? null,
+          notes: electricalDet.notes,
+        }
+      : null,
+
+    plumbing: plumbingDet
+      ? {
+          okForDeterministic: plumbingDet.okForDeterministic,
+          okForVerified: plumbingDet.okForVerified,
+          jobType: plumbingDet.jobType,
+          signals: plumbingDet.signals ?? null,
+          notes: plumbingDet.notes,
+        }
+      : null,
+  })
+}
+// IMPORTANT: Make sure your later logic respects this:
+// - Only run your "merged" (anchor/bigJob/door/mixed) block when pricingSource !== "deterministic"
+// - Only run AI realism when pricingSource === "ai"
+// =============================
+
+// ✅ Deterministic safety pricing ...
+// At this point pricingSource can only be "ai" or "merged" because deterministic already returned above.
+{
   const det: Pricing | null =
     anchorPricing ?? bigJobPricing ?? doorPricing ?? mixedPaintPricing ?? null
 
@@ -1616,8 +1827,6 @@ if (pricingSource !== "deterministic") {
 
     pricingFinal = clampPricing(merged)
     pricingSource = "merged"
-
-    // merged = protected, not verified
     priceGuardVerified = false
   } else {
     pricingFinal = normalized.pricing
@@ -1639,7 +1848,7 @@ if (!allowedTypes.includes(normalized.documentType)) {
     if (
   typeof normalized.documentType !== "string" ||
   typeof normalized.description !== "string" ||
-  !isValidPricing(normalized.pricing)
+  !isValidPricing(pricingFinal)
 ) {
   return NextResponse.json(
     { error: "AI response invalid", parsed },
@@ -1650,10 +1859,8 @@ if (!allowedTypes.includes(normalized.documentType)) {
 const shouldRunAiRealism = pricingSource === "ai"
 
 if (shouldRunAiRealism) {
-  // -----------------------------
-  // PRICING REALISM v2 (MARKET-ANCHORED)
-  // -----------------------------
-  const p = normalized.pricing
+  // ✅ run realism on the actual current pricing
+  const p = { ...pricingFinal } // copy so we don't mutate references unexpectedly
 
   // ---- Markup realism (true contractor ranges) ----
   if (p.markup < 12) p.markup = 15
@@ -1692,25 +1899,41 @@ if (shouldRunAiRealism) {
     Math.round((p.labor + p.materials + p.subs) * (p.markup / 100))
 
   if (impliedTotal > 0 && Math.abs(p.total - impliedTotal) / impliedTotal > 0.2) {
-  p.total = impliedTotal
-}
-
-  // ---- State labor multiplier ----
-  const stateAbbrev2 = getStateAbbrev(rawState)
-  const stateMultiplier2 = getStateLaborMultiplier(stateAbbrev2)
-
-  p.labor = Math.round(p.labor * stateMultiplier2)
+    p.total = impliedTotal
+  }
 
   p.total =
     p.labor + p.materials + p.subs +
     Math.round((p.labor + p.materials + p.subs) * (p.markup / 100))
 
   pricingFinal = clampPricing(p)
+
+  // ✅ keep normalized in sync for the response payload
+  normalized.pricing = pricingFinal
 } else {
   pricingFinal = clampPricing(pricingFinal)
 }
+
 const safePricing = pricingFinal
-const priceGuardProtected = pricingSource === "merged"
+
+const priceGuardProtected = (["merged", "deterministic"] as readonly string[]).includes(
+  pricingSource
+)
+
+  const usedNationalBaseline = !getStateAbbrev(rawState)
+
+const pg = buildPriceGuardReport({
+  pricingSource,
+  priceGuardVerified,
+  stateAbbrev,
+  rooms,
+  doors,
+  measurements,
+  effectivePaintScope: looksLikePainting ? effectivePaintScope : null,
+  anchorId: anchorHit?.id ?? null,
+  detSource,
+  usedNationalBaseline,
+})
 
     // Increment usage for free users only
     if (!isPaid) {
@@ -1731,6 +1954,8 @@ const priceGuardProtected = pricingSource === "merged"
   }
 }
 
+normalized.trade = trade
+
 return NextResponse.json({
   documentType: normalized.documentType,
   trade: normalized.trade || trade,
@@ -1742,6 +1967,7 @@ return NextResponse.json({
   priceGuardAnchor: anchorHit?.id ?? null,
   priceGuardVerified,
   priceGuardProtected,
+  priceGuard: pg,
 
   flooring: flooringDet
     ? {
@@ -1770,16 +1996,6 @@ return NextResponse.json({
       jobType: plumbingDet.jobType,
       signals: plumbingDet.signals ?? null,
       notes: plumbingDet.notes,
-    }
-  : null,
-
-  bathPlumbingRoughIn: bathPlumbingRoughInDet?.okForDeterministic
-  ? {
-      okForDeterministic: bathPlumbingRoughInDet.okForDeterministic,
-      okForVerified: bathPlumbingRoughInDet.okForVerified,
-      jobType: bathPlumbingRoughInDet.jobType,
-      signals: bathPlumbingRoughInDet.signals,
-      notes: bathPlumbingRoughInDet.notes,
     }
   : null,
 })
