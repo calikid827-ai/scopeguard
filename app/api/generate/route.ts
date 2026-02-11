@@ -9,6 +9,7 @@ import {
   hasHeavyPlumbingSignals,
   parsePlumbingFixtureBreakdown,
 } from "./lib/priceguard/plumbingEngine"
+import { computeDrywallDeterministic } from "./lib/priceguard/drywallEngine"
 
 export const dynamic = "force-dynamic"
 export const runtime = "nodejs"
@@ -76,6 +77,7 @@ type PriceGuardReport = {
     paintScope?: string | null
     anchorId?: string | null
     detSource?: string | null
+    priceGuardAnchorStrict?: boolean
   }
 }
 
@@ -87,6 +89,7 @@ function clampConfidence(n: number) {
 function buildPriceGuardReport(args: {
   pricingSource: "ai" | "deterministic" | "merged"
   priceGuardVerified: boolean
+  priceGuardAnchorStrict: boolean
   stateAbbrev: string
   rooms: number | null
   doors: number | null
@@ -108,7 +111,7 @@ function buildPriceGuardReport(args: {
     appliedRules.push("Deterministic pricing engine applied")
     score -= args.priceGuardVerified ? 2 : 8
   } else if (args.pricingSource === "merged") {
-    appliedRules.push("PriceGuard safety floor enforced (AI merged with deterministic)")
+    appliedRules.push("PriceGuard safety floor enforced (AI merged with PriceGuard baseline)")
     score -= 10
   } else {
     score -= 40
@@ -245,14 +248,22 @@ function clampPricing(pricing: Pricing): Pricing {
 function autoDetectTrade(scope: string): string {
   const s = scope.toLowerCase()
 
-  if (/(paint|painting|prime|primer|drywall patch|patch drywall)/.test(s))
+  // Drywall should come BEFORE painting so "drywall patch" doesn't become painting
+  if (/(drywall|sheetrock|skim\s*coat|tape\s*and\s*mud|taping|mudding|texture|orange\s*peel|knockdown)/.test(s))
+    return "drywall"
+
+  if (/(paint|painting|prime|primer)/.test(s))
     return "painting"
+
   if (/(floor|flooring|lvp|vinyl\s*plank|laminate|hardwood|carpet|tile\s+floor|floor\s+tile)/.test(s))
     return "flooring"
+
   if (/(electrical|outlet|switch|panel|lighting)/.test(s))
     return "electrical"
+
   if (/(plumb|toilet|sink|faucet|shower|water line)/.test(s))
     return "plumbing"
+
   if (/(carpentry|trim|baseboard|framing|cabinet)/.test(s))
     return "carpentry"
 
@@ -417,7 +428,7 @@ function priceKitchenRefreshAnchor(args: {
 
   // If it's a total gut/layout change, skip this anchor (future “kitchen_remodel” anchor)
   const majorRemodel =
-    /\b(gut|rebuild|move\s+wall|remove\s+wall|relocat(e|ing)\s+plumb|relocat(e|ing)\s+electrical|new\s+layout|structural)\b/.test(s)
+  /\b(remodel|renovation|demo|demolition|gut|rebuild|rebuild|full\s*replace|replace\s+all|move\s+wall|remove\s+wall|relocat(e|ing)\s+plumb|relocat(e|ing)\s+electrical|new\s+layout|structural)\b/.test(s)
   if (majorRemodel) return null
 
   // Size signal (you said it will usually exist in text or measurements)
@@ -507,6 +518,102 @@ function priceKitchenRefreshAnchor(args: {
   const dumpFee = hasDemo ? 300 : 0
   const supervision = Math.round((labor + materials) * 0.08)
   const subs = mobilization + dumpFee + supervision
+
+  const base = labor + materials + subs
+  const total = Math.round(base * (1 + markup / 100))
+
+  return { labor, materials, subs, markup, total }
+}
+
+function priceKitchenRemodelAnchor(args: {
+  scope: string
+  stateMultiplier: number
+  measurements?: any | null
+}): Pricing | null {
+  const s = args.scope.toLowerCase()
+
+  const isKitchen = /\bkitchen\b/.test(s) || parseKitchenKeyword(s)
+  if (!isKitchen) return null
+
+  // Must look like a remodel (not just a refresh)
+  const remodelSignals =
+    /\b(remodel|renovation|gut|demo|demolition|rebuild|full\s*replace|replace\s+all|new\s+layout)\b/.test(s)
+
+  if (!remodelSignals) return null
+
+  const sqft =
+    (args.measurements?.totalSqft && args.measurements.totalSqft > 0
+      ? Number(args.measurements.totalSqft)
+      : null) ??
+    parseSqft(s) ??
+    225
+
+  const hasCabinets =
+    /\b(cabinets?|cabinetry|install\s+cabinets?|replace\s+cabinets?)\b/.test(s)
+  const hasCounters =
+    /\b(counter(top)?s?|countertop|quartz|granite|laminate\s+counter)\b/.test(s)
+  const hasBacksplash = /\b(backsplash|tile\s+backsplash)\b/.test(s)
+  const hasSinkFaucet = /\b(sink|faucet)\b/.test(s)
+  const hasFlooring =
+    /\b(floor|flooring|lvp|vinyl\s+plank|laminate|hardwood|tile\s+floor)\b/.test(s)
+  const hasPaint = /\b(paint|painting|prime|primer|repaint)\b/.test(s)
+
+  const hasDemo = parseDemo(s) || /\b(remove\s+existing|tear\s*out)\b/.test(s)
+
+  const floorIsTile = hasFlooring && /\b(tile|porcelain|ceramic)\b/.test(s)
+  const floorIsLvp = hasFlooring && /\b(lvp|vinyl\s+plank|luxury\s+vinyl)\b/.test(s)
+  const floorIsLam = hasFlooring && /\b(laminate)\b/.test(s)
+
+  const laborRate = 105
+  const markup = 25
+
+  let laborHrs = 0
+  laborHrs += hasDemo ? 18 : 10
+  laborHrs += hasCabinets ? 40 : 20
+  laborHrs += hasCounters ? 10 : 6
+  laborHrs += hasBacksplash ? 16 : 0
+  laborHrs += hasPaint ? 12 : 0
+  laborHrs += hasSinkFaucet ? 6 : 0
+
+  if (hasFlooring) {
+    const installHrsPerSqft =
+      floorIsTile ? 0.12 :
+      (floorIsLvp || floorIsLam) ? 0.05 :
+      0.055
+    const demoHrsPerSqft = hasDemo ? 0.03 : 0
+    laborHrs += sqft * (installHrsPerSqft + demoHrsPerSqft)
+  }
+
+  laborHrs = Math.max(70, laborHrs + 10)
+
+  let labor = Math.round(laborHrs * laborRate)
+  labor = Math.round(labor * args.stateMultiplier)
+
+  let materials = 0
+  materials += hasCabinets ? 9500 : 3500
+  materials += hasCounters ? 2800 : 900
+  materials += hasBacksplash ? 900 : 0
+  materials += hasSinkFaucet ? 600 : 0
+  materials += hasPaint ? 250 : 0
+
+  if (hasFlooring) {
+    const matPerSqft =
+      floorIsTile ? 7.0 :
+      floorIsLvp ? 4.1 :
+      floorIsLam ? 3.4 :
+      4.2
+    const underlaymentPerSqft = floorIsTile ? 0 : 0.7
+    materials += Math.round(sqft * (matPerSqft + underlaymentPerSqft) + 250)
+  }
+
+  materials = Math.round(materials)
+
+  const mobilization = 650
+  const dumpFee = hasDemo ? 450 : 150
+  const supervision = Math.round((labor + materials) * 0.10)
+  const coordinationAllowance = 500
+
+  const subs = mobilization + dumpFee + supervision + coordinationAllowance
 
   const base = labor + materials + subs
   const total = Math.round(base * (1 + markup / 100))
@@ -752,6 +859,23 @@ function pricePlumbingFixtureSwapsAnchor(args: {
 const PRICEGUARD_ANCHORS: PricingAnchor[] = [
   
   // 1) Kitchen refresh (before bathroom so it doesn’t get “general renovation” collisions later)
+  {
+  id: "kitchen_remodel_v1",
+  when: (ctx) => {
+    const s = ctx.scope.toLowerCase()
+    const isKitchen = /\bkitchen\b/.test(s) || parseKitchenKeyword(s)
+    if (!isKitchen) return false
+
+    return /\b(remodel|renovation|gut|demo|demolition|rebuild|full\s*replace|replace\s+all|new\s+layout)\b/.test(s)
+  },
+  price: (ctx) =>
+    priceKitchenRemodelAnchor({
+      scope: ctx.scope,
+      stateMultiplier: ctx.stateMultiplier,
+      measurements: ctx.measurements,
+    }),
+},
+  
   {
     id: "kitchen_refresh_v1",
     when: (ctx) => /\bkitchen\b/i.test(ctx.scope) || parseKitchenKeyword(ctx.scope),
@@ -1164,10 +1288,20 @@ if (error) {
 }
 
     const isPaid = entitlement?.active === true
-const usageCount =
-  typeof entitlement?.usage_count === "number"
-    ? entitlement.usage_count
-    : 0
+    const usageCount = typeof entitlement?.usage_count === "number" ? entitlement.usage_count : 0
+
+async function incrementUsageIfFree() {
+  if (isPaid) return
+
+  const { error } = await supabase
+    .from("entitlements")
+    .upsert(
+      { email: normalizedEmail, usage_count: usageCount + 1, active: false },
+      { onConflict: "email" }
+    )
+
+  if (error) console.error("usage increment failed:", error)
+}
 
     // HARD abuse protection (refresh spam, bots)
 if (!isPaid && usageCount > FREE_LIMIT + 1) {
@@ -1263,13 +1397,30 @@ const plumbingDet =
     ? clampPricing(coercePricing(plumbingDet.pricing))
     : null
 
+    // Drywall deterministic engine (PriceGuard™)
+const drywallDet =
+  trade === "drywall"
+    ? computeDrywallDeterministic({
+        scopeText: scopeChange,
+        stateMultiplier,
+        measurements,
+      })
+    : null
+
+const drywallDetPricing: Pricing | null =
+  drywallDet?.okForDeterministic
+    ? clampPricing(coercePricing(drywallDet.pricing))
+    : null
+
     
    
   console.log("PG FLAGS", {
   trade,
   electrical_ok: electricalDet?.okForDeterministic,
   plumbing_ok: plumbingDet?.okForDeterministic,
+  drywall_ok: drywallDet?.okForDeterministic,
   plumbing_type: plumbingDet?.jobType,
+  drywall_type: drywallDet?.jobType,
 })
 
 // Only treat as painting when the final trade is painting
@@ -1277,9 +1428,7 @@ const looksLikePainting = trade === "painting"
 
 // PriceGuard™ v2 — Orchestration table (anchors only for non-deterministic trades)
 const anchorHit =
-  trade === "electrical" ||
-  trade === "plumbing" ||
-  trade === "flooring"
+  trade === "electrical" || trade === "plumbing" || trade === "flooring" || trade === "drywall"
     ? null
     : runPriceGuardAnchors({
         scope: scopeChange,
@@ -1293,6 +1442,12 @@ const anchorHit =
 console.log("PG ANCHOR", { hit: anchorHit?.id ?? null })
 
 const anchorPricing: Pricing | null = anchorHit?.pricing ?? null
+
+console.log("PG ANCHOR PRICING", {
+  hit: anchorHit?.id ?? null,
+  hasAnchorPricing: !!anchorPricing,
+  anchorTotal: anchorPricing?.total ?? null,
+})
 
 const useBigJobPricing =
   looksLikePainting &&
@@ -1686,6 +1841,14 @@ let priceGuardVerified = false
 let pricingFinal: Pricing = normalized.pricing
 let detSource: string | null = null
 
+// ✅ Treat kitchen remodel anchor as deterministic-owned (no merge)
+if (anchorHit?.id === "kitchen_remodel_v1" && anchorPricing) {
+  pricingFinal = clampPricing(coercePricing(anchorPricing))
+  pricingSource = "deterministic"
+  detSource = `anchor:${anchorHit.id}`
+  priceGuardVerified = true
+}
+
 function applyDeterministicOwnership(args: {
   pricing: Pricing | null
   okForVerified?: boolean
@@ -1701,8 +1864,8 @@ function applyDeterministicOwnership(args: {
   return true
 }
 
-// 1–3) Deterministic ownership checks (use a boolean flag TS can understand)
 const deterministicOwned =
+  pricingSource === "deterministic" ||
   (trade === "flooring" &&
     applyDeterministicOwnership({
       pricing: flooringDetPricing,
@@ -1723,19 +1886,27 @@ const deterministicOwned =
       okForVerified: !!plumbingDet?.okForVerified,
       sourceVerifiedId: "plumbing_engine_v1_verified",
       sourceId: "plumbing_engine_v1",
+    })) ||
+  (trade === "drywall" &&
+    applyDeterministicOwnership({
+      pricing: drywallDetPricing,
+      okForVerified: !!drywallDet?.okForVerified,
+      sourceVerifiedId: "drywall_engine_v1_verified",
+      sourceId: "drywall_engine_v1",
     }))
-  
-if (deterministicOwned) {
+
+    if (deterministicOwned) {
   const safePricing = clampPricing(pricingFinal)
   const priceGuardProtected = true
 
   normalized.trade = trade
 
-  const usedNationalBaseline = !getStateAbbrev(rawState)
+  const usedNationalBaseline = !(typeof stateAbbrev === "string" && stateAbbrev.length === 2)
 
 const pg = buildPriceGuardReport({
   pricingSource,
   priceGuardVerified,
+  priceGuardAnchorStrict: false,
   stateAbbrev,
   rooms,
   doors,
@@ -1745,6 +1916,8 @@ const pg = buildPriceGuardReport({
   detSource,
   usedNationalBaseline,
 })
+
+await incrementUsageIfFree()
 
   return NextResponse.json({
     documentType: normalized.documentType,
@@ -1788,6 +1961,16 @@ const pg = buildPriceGuardReport({
           notes: plumbingDet.notes,
         }
       : null,
+
+      drywall: drywallDet
+  ? {
+      okForDeterministic: drywallDet.okForDeterministic,
+      okForVerified: drywallDet.okForVerified,
+      jobType: drywallDet.jobType,
+      signals: drywallDet.signals ?? null,
+      notes: drywallDet.notes,
+    }
+  : null,
   })
 }
 // IMPORTANT: Make sure your later logic respects this:
@@ -1834,6 +2017,12 @@ const pg = buildPriceGuardReport({
     priceGuardVerified = false
   }
 }
+
+console.log("PG AFTER MERGE DECISION", {
+  pricingSource,
+  detSource,
+  total: pricingFinal.total,
+})
 
 const allowedTypes = [
   "Change Order",
@@ -1920,11 +2109,14 @@ const priceGuardProtected = (["merged", "deterministic"] as readonly string[]).i
   pricingSource
 )
 
-  const usedNationalBaseline = !getStateAbbrev(rawState)
+console.log("PG RESULT", { pricingSource, detSource, total: pricingFinal.total })
+
+  const usedNationalBaseline = !(typeof stateAbbrev === "string" && stateAbbrev.length === 2)
 
 const pg = buildPriceGuardReport({
   pricingSource,
   priceGuardVerified,
+  priceGuardAnchorStrict: false, // ✅ ADD THIS
   stateAbbrev,
   rooms,
   doors,
@@ -1935,26 +2127,9 @@ const pg = buildPriceGuardReport({
   usedNationalBaseline,
 })
 
-    // Increment usage for free users only
-    if (!isPaid) {
-  // Update if row exists
-  const { data: updated } = await supabase
-    .from("entitlements")
-    .update({ usage_count: usageCount + 1 })
-    .eq("email", normalizedEmail)
-    .select("email")
-    .maybeSingle()
-
-  if (!updated) {
-    await supabase.from("entitlements").insert({
-      email: normalizedEmail,
-      usage_count: 1,
-      active: false,
-    })
-  }
-}
-
 normalized.trade = trade
+
+await incrementUsageIfFree()
 
 return NextResponse.json({
   documentType: normalized.documentType,
@@ -1996,6 +2171,16 @@ return NextResponse.json({
       jobType: plumbingDet.jobType,
       signals: plumbingDet.signals ?? null,
       notes: plumbingDet.notes,
+    }
+  : null,
+
+  drywall: drywallDet
+  ? {
+      okForDeterministic: drywallDet.okForDeterministic,
+      okForVerified: drywallDet.okForVerified,
+      jobType: drywallDet.jobType,
+      signals: drywallDet.signals ?? null,
+      notes: drywallDet.notes,
     }
   : null,
 })

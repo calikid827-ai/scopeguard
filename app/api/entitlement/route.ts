@@ -18,17 +18,13 @@ function normalizeEmail(email: string) {
   return email.trim().toLowerCase()
 }
 
-// ✅ POST { email: "someone@example.com" }
 export async function POST(req: Request) {
   try {
-    const body = await req.json()
+    const body = await req.json().catch(() => null)
     const emailRaw = body?.email
 
     if (!emailRaw || typeof emailRaw !== "string") {
-      return NextResponse.json(
-        { entitled: false, usage_count: 0, free_limit: FREE_LIMIT },
-        { status: 400 }
-      )
+      return NextResponse.json({ entitled: false, usage_count: 0, free_limit: FREE_LIMIT })
     }
 
     const email = normalizeEmail(emailRaw)
@@ -41,23 +37,16 @@ export async function POST(req: Request) {
 
     if (error) {
       console.error("Entitlement lookup error:", error)
-      return NextResponse.json(
-        { entitled: false, usage_count: 0, free_limit: FREE_LIMIT },
-        { status: 500 }
-      )
+      return NextResponse.json({ entitled: false, usage_count: 0, free_limit: FREE_LIMIT })
     }
 
-    // If no row yet, treat as not entitled + 0 used
-    const entitled = data?.active === true
-    const usage_count =
-      typeof data?.usage_count === "number" ? data.usage_count : 0
-
-    return NextResponse.json({ entitled, usage_count, free_limit: FREE_LIMIT })
+    return NextResponse.json({
+      entitled: data?.active === true,
+      usage_count: typeof data?.usage_count === "number" ? data.usage_count : 0,
+      free_limit: FREE_LIMIT,
+    })
   } catch (err) {
     console.error("Entitlement route failed:", err)
-    return NextResponse.json(
-      { entitled: false, usage_count: 0, free_limit: FREE_LIMIT },
-      { status: 500 }
-    )
+    return NextResponse.json({ entitled: false, usage_count: 0, free_limit: FREE_LIMIT })
   }
 }
