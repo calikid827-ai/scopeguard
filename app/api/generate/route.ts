@@ -1,6 +1,16 @@
-import { NextResponse } from "next/server"
+import { NextRequest, NextResponse } from "next/server"
 import OpenAI from "openai"
 import { createClient } from "@supabase/supabase-js"
+
+import {
+  GenerateSchema,
+  cleanScopeText,
+  jsonError,
+  assertSameOrigin,
+  assertBodySize,
+} from "./lib/guards"
+
+import { rateLimit } from "./lib/rateLimit"
 
 import { computeFlooringDeterministic } from "./lib/priceguard/flooringEngine"
 import { computeElectricalDeterministic } from "./lib/priceguard/electricalEngine"
@@ -170,14 +180,15 @@ function buildPriceGuardReport(args: {
     assumptions,
     warnings,
     details: {
-      stateAdjusted,
-      stateAbbrev: args.stateAbbrev || undefined,
-      rooms: args.rooms,
-      doors: args.doors,
-      paintScope: args.effectivePaintScope,
-      anchorId: args.anchorId,
-      detSource: args.detSource,
-    },
+  stateAdjusted,
+  stateAbbrev: args.stateAbbrev || undefined,
+  rooms: args.rooms,
+  doors: args.doors,
+  paintScope: args.effectivePaintScope,
+  anchorId: args.anchorId,
+  detSource: args.detSource,
+  priceGuardAnchorStrict: args.priceGuardAnchorStrict,
+},
   }
 }
 
@@ -1236,10 +1247,67 @@ function pricePaintingDoors(args: {
 // -----------------------------
 // API HANDLER
 // -----------------------------
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
-    
-    const body = await req.json()
+    // -----------------------------
+  // HARDENED FRONT DOOR
+  // -----------------------------
+  if (!assertBodySize(req, 40_000)) {
+    return jsonError(413, "BODY_TOO_LARGE", "Request too large.")
+  }
+
+  if (!assertSameOrigin(req)) {
+    return jsonError(403, "BAD_ORIGIN", "Invalid request origin.")
+  }
+
+  // Rate limit (IP + email). Email needs body, so parse first safely.
+  let raw: any
+  try {
+    raw = await req.json()
+  } catch {
+    return jsonError(400, "BAD_JSON", "Invalid JSON body.")
+  }
+
+  const inputParsed = GenerateSchema.safeParse(raw)
+if (!inputParsed.success) {
+  return jsonError(400, "BAD_INPUT", "Invalid request fields.")
+}
+
+const body = inputParsed.data
+  body.scopeChange = cleanScopeText(body.scopeChange)
+
+  const normalizedEmail = body.email.trim().toLowerCase()
+
+  const ip =
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    req.headers.get("x-real-ip") ||
+    "unknown"
+
+  const rl1 = rateLimit(`gen:ip:${ip}`, 20, 60_000)
+  if (!rl1.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "RATE_LIMIT",
+        message: "Too many requests.",
+        retry_after: Math.ceil((rl1.resetAt - Date.now()) / 1000),
+      },
+      { status: 429 }
+    )
+  }
+
+  const rl2 = rateLimit(`gen:email:${normalizedEmail}`, 12, 60_000)
+  if (!rl2.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "RATE_LIMIT",
+        message: "Too many requests.",
+        retry_after: Math.ceil((rl2.resetAt - Date.now()) / 1000),
+      },
+      { status: 429 }
+    )
+  }
     const measurements = body.measurements ?? null
 
     type PaintScope = "walls" | "walls_ceilings" | "full"
@@ -1252,7 +1320,6 @@ const paintScope: PaintScope | null =
     ? body.paintScope
     : null
 
-    const email = body.email
     const scopeChange = body.scopeChange
     const uiTradeRaw =
       typeof body.trade === "string" ? body.trade.trim().toLowerCase() : ""
@@ -1267,22 +1334,6 @@ const paintScope: PaintScope | null =
       ? "general renovation"
       : uiTradeRaw
     const rawState = typeof body.state === "string" ? body.state.trim() : ""
-
-    // -----------------------------
-    // BASIC VALIDATION
-    // -----------------------------
-    if (!email || typeof email !== "string") {
-      return NextResponse.json({ error: "Email required" }, { status: 400 })
-    }
-
-    const normalizedEmail = email.trim().toLowerCase()
-
-    if (!scopeChange || typeof scopeChange !== "string") {
-      return NextResponse.json(
-        { error: "Invalid scopeChange" },
-        { status: 400 }
-      )
-    }
 
     // -----------------------------
     // ENTITLEMENT + FREE LIMIT ENFORCEMENT
@@ -1304,12 +1355,9 @@ if (error) {
 async function incrementUsageIfFree() {
   if (isPaid) return
 
-  const { error } = await supabase
-    .from("entitlements")
-    .upsert(
-      { email: normalizedEmail, usage_count: usageCount + 1, active: false },
-      { onConflict: "email" }
-    )
+  const { error } = await supabase.rpc("increment_usage", {
+    p_email: normalizedEmail,
+  })
 
   if (error) console.error("usage increment failed:", error)
 }
@@ -1359,6 +1407,7 @@ const rooms = parseRoomCount(scopeChange)
 const doors = parseDoorCount(scopeChange)
 
 const stateAbbrev = getStateAbbrev(rawState)
+const usedNationalBaseline = !(typeof stateAbbrev === "string" && stateAbbrev.length === 2)
 const stateMultiplier = getStateLaborMultiplier(stateAbbrev)
 
 // -----------------------------
@@ -1822,29 +1871,46 @@ try {
   )
 }
 
-    const raw = completion.choices[0]?.message?.content
-    if (!raw) throw new Error("Empty AI response")
+    const rawContent = completion.choices[0]?.message?.content
+if (!rawContent) throw new Error("Empty AI response")
 
-
-    let parsed: any
+let aiParsed: any
 try {
-  parsed = JSON.parse(raw)
-} catch {
+  aiParsed = JSON.parse(rawContent)
+} catch (e) {
+  console.error("AI returned non-JSON:", rawContent)
   return NextResponse.json(
     { error: "AI response was not valid JSON" },
     { status: 500 }
   )
 }
 
-    const normalized: any = {
-  documentType: parsed.documentType ?? parsed.document_type,
-  trade: parsed.trade,
-  description: parsed.description,
-  pricing: parsed.pricing,
+const normalized: any = {
+  documentType: aiParsed.documentType ?? aiParsed.document_type,
+  trade: aiParsed.trade,
+  description: aiParsed.description,
+  pricing: aiParsed.pricing,
 }
 
 // 🔒 Coerce AI pricing to numbers (prevents string math bugs)
 normalized.pricing = clampPricing(coercePricing(normalized.pricing))
+
+// ✅ Normalize documentType BEFORE any early returns (deterministic path included)
+const allowedTypes = [
+  "Change Order",
+  "Estimate",
+  "Change Order / Estimate",
+] as const
+
+if (!allowedTypes.includes(normalized.documentType)) {
+  normalized.documentType = "Change Order / Estimate"
+}
+
+if (typeof normalized.description !== "string" || normalized.description.trim().length < 10) {
+  const tradeLabel = typeof trade === "string" && trade.length ? trade : "the selected"
+  normalized.description =
+    `This ${normalized.documentType} covers the described scope of work as provided, including labor, materials, protection, and cleanup associated with ${tradeLabel} scope.`
+}
 
 // Start from AI as default
 let pricingSource: "ai" | "deterministic" | "merged" = "ai"
@@ -1858,6 +1924,45 @@ if (anchorHit?.id === "kitchen_remodel_v1" && anchorPricing) {
   pricingSource = "deterministic"
   detSource = `anchor:${anchorHit.id}`
   priceGuardVerified = true
+}
+// ✅ Rooms + doors mixed painting deterministic-owned
+if (
+  pricingSource !== "deterministic" &&
+  looksLikePainting &&
+  typeof rooms === "number" && rooms > 0 &&
+  typeof doors === "number" && doors > 0 &&
+  mixedPaintPricing
+) {
+  pricingFinal = clampPricing(coercePricing(mixedPaintPricing))
+  pricingSource = "deterministic"
+  detSource = "painting_rooms_plus_doors"
+  priceGuardVerified = false
+}
+
+// ✅ Doors-only painting deterministic-owned
+if (
+  pricingSource !== "deterministic" &&
+  looksLikePainting &&
+  effectivePaintScope === "doors_only" &&
+  doorPricing
+) {
+  pricingFinal = clampPricing(coercePricing(doorPricing))
+  pricingSource = "deterministic"
+  detSource = "painting_doors_only"
+  priceGuardVerified = false
+}
+
+// ✅ Big painting jobs deterministic-owned
+if (
+  pricingSource !== "deterministic" &&
+  looksLikePainting &&
+  useBigJobPricing &&
+  bigJobPricing
+) {
+  pricingFinal = clampPricing(coercePricing(bigJobPricing))
+  pricingSource = "deterministic"
+  detSource = "painting_big_job"
+  priceGuardVerified = false
 }
 
 function applyDeterministicOwnership(args: {
@@ -1906,29 +2011,27 @@ const deterministicOwned =
       sourceId: "drywall_engine_v1",
     }))
 
-    if (deterministicOwned) {
+if (deterministicOwned) {
   const safePricing = clampPricing(pricingFinal)
   const priceGuardProtected = true
 
   normalized.trade = trade
 
-  const usedNationalBaseline = !(typeof stateAbbrev === "string" && stateAbbrev.length === 2)
+  const pg = buildPriceGuardReport({
+    pricingSource,
+    priceGuardVerified,
+    priceGuardAnchorStrict: false,
+    stateAbbrev,
+    rooms,
+    doors,
+    measurements,
+    effectivePaintScope: looksLikePainting ? effectivePaintScope : null,
+    anchorId: anchorHit?.id ?? null,
+    detSource,
+    usedNationalBaseline,
+  })
 
-const pg = buildPriceGuardReport({
-  pricingSource,
-  priceGuardVerified,
-  priceGuardAnchorStrict: false,
-  stateAbbrev,
-  rooms,
-  doors,
-  measurements,
-  effectivePaintScope: looksLikePainting ? effectivePaintScope : null,
-  anchorId: anchorHit?.id ?? null,
-  detSource,
-  usedNationalBaseline,
-})
-
-await incrementUsageIfFree()
+  await incrementUsageIfFree()
 
   return NextResponse.json({
     documentType: normalized.documentType,
@@ -1973,45 +2076,49 @@ await incrementUsageIfFree()
         }
       : null,
 
-      drywall: drywallDet
-  ? {
-      okForDeterministic: drywallDet.okForDeterministic,
-      okForVerified: drywallDet.okForVerified,
-      jobType: drywallDet.jobType,
-      signals: drywallDet.signals ?? null,
-      notes: drywallDet.notes,
-    }
-  : null,
+    drywall: drywallDet
+      ? {
+          okForDeterministic: drywallDet.okForDeterministic,
+          okForVerified: drywallDet.okForVerified,
+          jobType: drywallDet.jobType,
+          signals: drywallDet.signals ?? null,
+          notes: drywallDet.notes,
+        }
+      : null,
   })
 }
+
 // IMPORTANT: Make sure your later logic respects this:
 // - Only run your "merged" (anchor/bigJob/door/mixed) block when pricingSource !== "deterministic"
 // - Only run AI realism when pricingSource === "ai"
 // =============================
 
 // ✅ Deterministic safety pricing ...
-// At this point pricingSource can only be "ai" or "merged" because deterministic already returned above.
-{
-  const det: Pricing | null =
+// Only run merge/AI fallback when deterministic did NOT claim ownership.
+if (pricingSource !== "deterministic") {
+  const detPickedRaw: Pricing | null =
     anchorPricing ?? bigJobPricing ?? doorPricing ?? mixedPaintPricing ?? null
 
-  if (det) {
+  // ✅ detSource must be based on the raw winner (reference identity)
+  detSource =
+    detPickedRaw === anchorPricing ? `anchor:${anchorHit?.id}` :
+    detPickedRaw === bigJobPricing ? "painting_big_job" :
+    detPickedRaw === doorPricing ? "painting_doors_only" :
+    detPickedRaw === mixedPaintPricing ? "painting_rooms_plus_doors" :
+    null
+
+  // ✅ safe normalized deterministic baseline used for math
+  const detPicked = detPickedRaw ? clampPricing(coercePricing(detPickedRaw)) : null
+
+  if (detPicked) {
     const ai = normalized.pricing
-
-    detSource =
-      anchorPricing ? `anchor:${anchorHit?.id}` :
-      bigJobPricing ? "painting_big_job" :
-      doorPricing ? "painting_doors_only" :
-      mixedPaintPricing ? "painting_rooms_plus_doors" :
-      null
-
     const aiMarkup = Number.isFinite(ai.markup) ? ai.markup : 20
-    const mergedMarkup = Math.min(25, Math.max(15, Math.max(aiMarkup, det.markup)))
+    const mergedMarkup = Math.min(25, Math.max(15, Math.max(aiMarkup, detPicked.markup)))
 
     const merged: Pricing = {
-      labor: Math.max(ai.labor, det.labor),
-      materials: Math.max(ai.materials, det.materials),
-      subs: Math.max(ai.subs, det.subs),
+      labor: Math.max(ai.labor, detPicked.labor),
+      materials: Math.max(ai.materials, detPicked.materials),
+      subs: Math.max(ai.subs, detPicked.subs),
       markup: mergedMarkup,
       total: 0,
     }
@@ -2026,6 +2133,7 @@ await incrementUsageIfFree()
     pricingFinal = normalized.pricing
     pricingSource = "ai"
     priceGuardVerified = false
+    detSource = null
   }
 }
 
@@ -2035,25 +2143,15 @@ console.log("PG AFTER MERGE DECISION", {
   total: pricingFinal.total,
 })
 
-const allowedTypes = [
-  "Change Order",
-  "Estimate",
-  "Change Order / Estimate",
-]
-
-if (!allowedTypes.includes(normalized.documentType)) {
-  normalized.documentType = "Change Order / Estimate"
-}
-
     if (
   typeof normalized.documentType !== "string" ||
   typeof normalized.description !== "string" ||
   !isValidPricing(pricingFinal)
 ) {
   return NextResponse.json(
-    { error: "AI response invalid", parsed },
-    { status: 500 }
-  )
+  { error: "AI response invalid", aiParsed },
+  { status: 500 }
+)
 }
 
 const shouldRunAiRealism = pricingSource === "ai"
@@ -2121,8 +2219,6 @@ const priceGuardProtected = (["merged", "deterministic"] as readonly string[]).i
 )
 
 console.log("PG RESULT", { pricingSource, detSource, total: pricingFinal.total })
-
-  const usedNationalBaseline = !(typeof stateAbbrev === "string" && stateAbbrev.length === 2)
 
 const pg = buildPriceGuardReport({
   pricingSource,
