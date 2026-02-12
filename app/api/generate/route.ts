@@ -1258,12 +1258,14 @@ const paintScope: PaintScope | null =
       typeof body.trade === "string" ? body.trade.trim().toLowerCase() : ""
 
     const uiTrade =
-      uiTradeRaw === "auto-detect" ||
-      uiTradeRaw === "auto detect" ||
-      uiTradeRaw === "autodetect" ||
-      uiTradeRaw === "auto"
-        ? ""
-        : uiTradeRaw
+  uiTradeRaw === "auto-detect" ||
+  uiTradeRaw === "auto detect" ||
+  uiTradeRaw === "autodetect" ||
+  uiTradeRaw === "auto"
+    ? ""
+    : uiTradeRaw === "bathroom_tile" || uiTradeRaw === "general_renovation"
+      ? "general renovation"
+      : uiTradeRaw
     const rawState = typeof body.state === "string" ? body.state.trim() : ""
 
     // -----------------------------
