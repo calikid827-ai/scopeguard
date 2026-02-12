@@ -4,10 +4,14 @@ import { useEffect, useRef, useState } from "react"
 
 type PaintScope = "walls" | "walls_ceilings" | "full"
 type EffectivePaintScope = PaintScope | "doors_only"
+type DocumentType = "Change Order" | "Estimate" | "Change Order / Estimate"
 
 export default function Home() {
   const FREE_LIMIT = 3
   const generatingRef = useRef(false)
+
+// Prevent out-of-order entitlement responses from overwriting newer state
+const entitlementReqId = useRef(0)
   
   const PAINT_SCOPE_OPTIONS = [
   { label: "Walls only", value: "walls" },
@@ -152,6 +156,8 @@ const normalizeTrade = (t: any): UiTrade => {
 type EstimateHistoryItem = {
   id: string
   createdAt: number
+  documentType: "Change Order" | "Estimate" | "Change Order / Estimate"
+  
   // job context snapshot
   jobDetails: {
     clientName: string
@@ -188,8 +194,9 @@ const [jobDetails, setJobDetails] = useState({
   date: "", // optional override; blank = auto-today in PDF
 })
 
-
 useEffect(() => {
+  if (typeof window === "undefined") return
+
   // migrate old key once if it exists
   const old = localStorage.getItem("scopeguard_email")
   if (old) {
@@ -204,6 +211,8 @@ useEffect(() => {
 }, [])
 
 useEffect(() => {
+  if (typeof window === "undefined") return
+
   if (email) {
     localStorage.setItem(EMAIL_KEY, email)
   } else {
@@ -211,39 +220,57 @@ useEffect(() => {
   }
 }, [email])
 
-  async function checkEntitlementNow() {
+   async function checkEntitlementNow() {
+  const reqId = ++entitlementReqId.current
+
   const e = email.trim().toLowerCase()
   if (!e) return
 
-  const res = await fetch("/api/entitlement", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email: e }),
-  })
+  try {
+    const res = await fetch("/api/entitlement", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: e }),
+    })
 
-  if (!res.ok) {
+    // ignore stale responses
+    if (reqId !== entitlementReqId.current) return
+
+    if (!res.ok) {
+      setPaid(false)
+      setRemaining(FREE_LIMIT) // optional fallback
+      setShowUpgrade(false) // optional fallback
+      return
+    }
+
+    const data = await res.json()
+
+    // ignore stale responses (in case JSON parse was slow)
+    if (reqId !== entitlementReqId.current) return
+
+    const entitled = data?.entitled === true
+    setPaid(entitled)
+
+    const used = typeof data?.usage_count === "number" ? data.usage_count : 0
+    const limit =
+      typeof data?.free_limit === "number" ? data.free_limit : FREE_LIMIT
+
+    if (!entitled) {
+      const remainingNow = Math.max(0, limit - used)
+      setRemaining(remainingNow)
+      setShowUpgrade(remainingNow <= 0)
+    } else {
+      setRemaining(FREE_LIMIT) // optional
+      setShowUpgrade(false)
+    }
+  } catch {
+    // ignore stale responses
+    if (reqId !== entitlementReqId.current) return
+
     setPaid(false)
-    setRemaining(FREE_LIMIT)   // optional fallback
-    setShowUpgrade(false)      // optional fallback
-    return
+    setRemaining(FREE_LIMIT)
+    setShowUpgrade(false)
   }
-
-  const data = await res.json()
-
-  const entitled = data?.entitled === true
-  setPaid(entitled)
-
-  const used = typeof data?.usage_count === "number" ? data.usage_count : 0
-  const limit = typeof data?.free_limit === "number" ? data.free_limit : FREE_LIMIT
-
-  if (!entitled) {
-  const remainingNow = Math.max(0, limit - used)
-  setRemaining(remainingNow)
-  setShowUpgrade(remainingNow <= 0)
-} else {
-  setRemaining(FREE_LIMIT) // optional
-  setShowUpgrade(false)
-}
 }
 
 useEffect(() => {
@@ -270,32 +297,46 @@ useEffect(() => {
   })
 
   useEffect(() => {
+  if (typeof window === "undefined") return
+
   const old = localStorage.getItem("scopeguard_company")
   if (old) {
     localStorage.setItem(COMPANY_KEY, old)
     localStorage.removeItem("scopeguard_company")
-    try { setCompanyProfile(JSON.parse(old)) } catch {}
+    try {
+      setCompanyProfile(JSON.parse(old))
+    } catch {}
     return
   }
 
   const saved = localStorage.getItem(COMPANY_KEY)
-  if (saved) { try { setCompanyProfile(JSON.parse(saved)) } catch {}
+  if (saved) {
+    try {
+      setCompanyProfile(JSON.parse(saved))
+    } catch {}
   }
 }, [])
 
   useEffect(() => {
-  localStorage.setItem(COMPANY_KEY,JSON.stringify(companyProfile))
+  if (typeof window === "undefined") return
+  localStorage.setItem(COMPANY_KEY, JSON.stringify(companyProfile))
 }, [companyProfile])
-  useEffect(() => {
+  
+useEffect(() => {
+  if (typeof window === "undefined") return
+
   const saved = localStorage.getItem(JOB_KEY)
   if (saved) setJobDetails(JSON.parse(saved))
 }, [])
 
 useEffect(() => {
+  if (typeof window === "undefined") return
   localStorage.setItem(JOB_KEY, JSON.stringify(jobDetails))
 }, [jobDetails])
 
 useEffect(() => {
+  if (typeof window === "undefined") return
+
   const saved = localStorage.getItem(HISTORY_KEY)
   if (saved) {
     try {
@@ -304,6 +345,12 @@ useEffect(() => {
   const cleaned: EstimateHistoryItem[] = parsed.map((x: any) => ({
     id: String(x?.id ?? `${Date.now()}_${Math.random().toString(16).slice(2)}`),
     createdAt: Number(x?.createdAt ?? Date.now()),
+    documentType:
+  x?.documentType === "Change Order" ||
+  x?.documentType === "Estimate" ||
+  x?.documentType === "Change Order / Estimate"
+    ? x.documentType
+    : "Change Order / Estimate",
     jobDetails: {
       clientName: String(x?.jobDetails?.clientName ?? ""),
       jobName: String(x?.jobDetails?.jobName ?? ""),
@@ -339,6 +386,9 @@ useEffect(() => {
   // -------------------------
   const [scopeChange, setScopeChange] = useState("")
   const [result, setResult] = useState("")
+  const [documentType, setDocumentType] = useState<
+  "Change Order" | "Estimate" | "Change Order / Estimate"
+>("Change Order / Estimate")
   const [trade, setTrade] = useState<UiTrade>("")
   const [state, setState] = useState("")
   const [paintScope, setPaintScope] = useState<PaintScope>("walls")
@@ -416,21 +466,23 @@ const effectivePaintScope: EffectivePaintScope =
   const [invoices, setInvoices] = useState<Invoice[]>([])
 
   useEffect(() => {
+  if (typeof window === "undefined") return
+
   const saved = localStorage.getItem(INVOICE_KEY)
   if (!saved) return
 
   try {
     const parsed = JSON.parse(saved)
     if (Array.isArray(parsed)) setInvoices(parsed)
-  } catch (err) {
+  } catch {
     // ignore bad data
   }
 }, [])
 
 useEffect(() => {
+  if (typeof window === "undefined") return
   localStorage.setItem(INVOICE_KEY, JSON.stringify(invoices))
 }, [invoices])
-  
   
   useEffect(() => {
   if (paid) setShowUpgrade(false)
@@ -490,6 +542,7 @@ async function generate() {
   setLoading(true)
   setStatus("") // prevents duplicate “Generating…” line
   setResult("")
+  setDocumentType("Change Order / Estimate")
   setPricingSource("ai")
   setShowPriceGuardDetails(false)
   setPriceGuard(null)
@@ -552,8 +605,17 @@ const tradeToSend =
     console.log("pricingSource:", data.pricingSource)
 
     const nextVerified = data?.priceGuardVerified === true
-setPriceGuardVerified(nextVerified)
-setPriceGuard(data?.priceGuard ?? null)
+    setPriceGuardVerified(nextVerified)
+    setPriceGuard(data?.priceGuard ?? null)
+
+    const nextDocumentType =
+     data?.documentType === "Change Order" ||
+     data?.documentType === "Estimate" ||
+     data?.documentType === "Change Order / Estimate"
+      ? data.documentType
+      : "Change Order / Estimate"
+
+    setDocumentType(nextDocumentType)
 
 const nextResult = data.text || data.description || ""
 const nextPricing = data.pricing ? data.pricing : pricing
@@ -564,14 +626,13 @@ setResult(nextResult)
 setPricing(nextPricing)
 setPricingSource(nextPricingSource)
 const nextTrade: UiTrade = trade ? trade : normalizeTrade(data?.trade)
-
-// only auto-set trade when user left it blank
 if (!trade && nextTrade) setTrade(nextTrade)
 
 saveToHistory({
   id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
   createdAt: Date.now(),
   jobDetails: { ...jobDetails },
+  documentType: nextDocumentType,
   trade: nextTrade,
   state: state || "",
   scopeChange: scopeChange || "",
@@ -662,6 +723,7 @@ function clearHistory() {
 // ✅ Load history item back into the form
 function loadHistoryItem(item: EstimateHistoryItem) {
   setJobDetails(item.jobDetails)
+  setDocumentType(item.documentType || "Change Order / Estimate")
   setTrade(item.trade || "")
   setState(item.state || "")
   setScopeChange(item.scopeChange || "")
@@ -694,6 +756,8 @@ function loadHistoryItem(item: EstimateHistoryItem) {
     const jobName = jobDetails.jobName?.trim() || ""
     const jobAddress = jobDetails.jobAddress?.trim() || ""
     const changeOrderNo = jobDetails.changeOrderNo?.trim() || ""
+    const showPriceGuardNote =
+    pdfShowPriceGuard && documentType !== "Change Order"
 
     const win = window.open("", "", "width=900,height=1100")
     if (!win) {
@@ -702,20 +766,20 @@ function loadHistoryItem(item: EstimateHistoryItem) {
     }
 
     // Basic HTML escaping to prevent broken PDFs if user types special chars
-    const esc = (s: string) =>
-      s
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;")
+    const esc = (s: any) =>
+  String(s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;")
 
     const safeResult = esc(result || "")
 
     win.document.write(`
       <html>
         <head>
-          <title>${esc(brandName)} — ${esc(jobName || "Change Order / Estimate")}</title>
+          <title>${esc(brandName)} — ${esc(documentType || "Change Order / Estimate")} — ${esc(jobName || "")}</title>
           <meta charset="utf-8" />
           <style>
             @page { margin: 22mm 18mm; }
@@ -908,15 +972,15 @@ function loadHistoryItem(item: EstimateHistoryItem) {
             </div>
           </div>
 
-          <h1>Change Order / Estimate
-  ${
-  pdfShowPriceGuard
-  ? `<span class="badge">${esc(pdfPriceGuardLabel)}</span>`
-  : pdfEdited
-  ? `<span class="badge">Edited</span>`
-  : ""
-}
-</h1>
+          <h1>${esc(documentType || "Change Order / Estimate")}
+            ${
+              pdfShowPriceGuard
+                ? `<span class="badge">${esc(pdfPriceGuardLabel)}</span>`
+                : pdfEdited
+                ? `<span class="badge">Edited</span>`
+                : ""
+             }
+          </h1>
 
 <div class="muted" style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;">
   <div>
@@ -955,17 +1019,17 @@ function loadHistoryItem(item: EstimateHistoryItem) {
   </div>
 ` : ""}
 
-            ${pdfShowPriceGuard ? `
+            ${showPriceGuardNote ? `
   <div class="muted" style="margin-top:8px; line-height:1.4;">
     <strong>${esc(pdfPriceGuardLabel)} (Informational):</strong>
-    This estimate includes automated pricing safeguards (e.g., scope checks, quantity detection, minimums, and regional adjustments).
-    It is not a guarantee of final cost. Final pricing may change based on site conditions, selections, and confirmed measurements.
+    Pricing reflects the scope described above and typical site conditions at time of preparation.
+    If site conditions, selections, quantities, or scope change after issuance, the final price will be adjusted accordingly.
   </div>
 ` : ""}
 
-</div>
-
-          <div class="approvalsRow">
+</div>   
+   
+<div class="approvalsRow">
   <div class="approval">
     <div class="approvalTitle">Contractor Approval</div>
 
@@ -1035,13 +1099,13 @@ function loadHistoryItem(item: EstimateHistoryItem) {
     return
   }
 
-  const esc = (s: string) =>
-    (s || "")
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#039;")
+  const esc = (s: any) =>
+  String(s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;")
 
   const money = (n: number) => `$${Number(n || 0).toLocaleString()}`
 
@@ -1893,7 +1957,7 @@ const sub =
       <button
   type="button"
   onClick={generate}
-  disabled={loading || !scopeChange.trim()}
+  disabled={loading}
   style={{
     width: "100%",
     padding: 12,
@@ -1906,7 +1970,7 @@ const sub =
     cursor: loading ? "not-allowed" : "pointer",
   }}
 >
-  {loading ? "Generating…" : "Generate Change Order / Estimate"}
+  {loading ? "Generating…" : "Generate"}
 </button>
 {status && (
   <p style={{ marginTop: 10, fontSize: 13, color: "#c53030" }}>
@@ -1919,19 +1983,6 @@ const sub =
     Generating professional document…
   </p>
 )}
-
-{result && (
-  <div
-    style={{
-      marginTop: 24,
-      padding: 16,
-      background: "#f5f5f5",
-      borderRadius: 8,
-      whiteSpace: "pre-wrap",
-      lineHeight: 1.6,
-      fontSize: 15,
-    }}
-  >
 
 {/* -------------------------
     Saved History
@@ -1973,10 +2024,10 @@ const sub =
               <div style={{ fontWeight: 700 }}>
                 {h.jobDetails.jobName || "Untitled Job"}
               </div>
-              <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>
-                {h.jobDetails.clientName ? `Client: ${h.jobDetails.clientName} • ` : ""}
-                {new Date(h.createdAt).toLocaleString()}
-              </div>
+             <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>
+  {h.jobDetails.clientName ? `Client: ${h.jobDetails.clientName} • ` : ""}
+  {h.documentType} • {new Date(h.createdAt).toLocaleString()}
+</div>
               <div style={{ fontSize: 12, color: "#333", marginTop: 6 }}>
                 Total: <strong>${Number(h.pricing.total || 0).toLocaleString()}</strong>
               </div>
@@ -2010,8 +2061,20 @@ const sub =
   </div>
 )}
 
+{result && (
+  <div
+    style={{
+      marginTop: 24,
+      padding: 16,
+      background: "#f5f5f5",
+      borderRadius: 8,
+      whiteSpace: "pre-wrap",
+      lineHeight: 1.6,
+      fontSize: 15,
+    }}
+  >
     <h3 style={{ marginBottom: 8 }}>
-      Generated Change Order / Estimate
+      Generated {documentType}
     </h3>
 
     <p

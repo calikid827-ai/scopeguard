@@ -6,9 +6,9 @@ export default function HomePage() {
   return (
     <main
       style={{
-        maxWidth: 1040,
-        margin: "60px auto",
-        padding: "0 18px 70px",
+        maxWidth: 980,
+        margin: "70px auto",
+        padding: "0 22px 80px",
         fontFamily:
           'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"',
         color: "#0b0b0b",
@@ -18,26 +18,19 @@ export default function HomePage() {
       <header
         style={{
           display: "flex",
-          alignItems: "center",
           justifyContent: "space-between",
-          gap: 14,
-          padding: "10px 0 18px",
-          borderBottom: "1px solid #eee",
+          alignItems: "center",
+          padding: "10px 0 26px",
         }}
       >
-        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-          <div style={{ fontWeight: 950, letterSpacing: "-0.3px" }}>
-            JobEstimate Pro
-          </div>
-          <div style={{ fontSize: 12, color: "#666" }}>
-            Change orders & estimates
-          </div>
+        <div style={{ fontWeight: 900, letterSpacing: "-0.3px" }}>
+          JobEstimate <span style={{ color: "#111" }}>Pro</span>
         </div>
 
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <div style={{ fontSize: 12, color: "#666" }}>
-            Built for contractors
-          </div>
+          <span style={{ fontSize: 12, color: "#666" }}>
+            Built for real contractors
+          </span>
           <Link href="/app">
             <button
               style={{
@@ -48,7 +41,7 @@ export default function HomePage() {
                 border: "none",
                 borderRadius: 10,
                 cursor: "pointer",
-                fontWeight: 800,
+                fontWeight: 700,
               }}
             >
               Open App
@@ -57,190 +50,193 @@ export default function HomePage() {
         </div>
       </header>
 
-      {/* HERO + PREVIEW */}
+      {/* HERO */}
       <section
         style={{
-          marginTop: 26,
-          display: "grid",
-          gridTemplateColumns: "1.05fr 0.95fr",
-          gap: 22,
-          alignItems: "start",
+          padding: "34px 26px",
+          borderRadius: 20,
+          border: "1px solid #e7e7e7",
+          background:
+            "linear-gradient(180deg, rgba(0,0,0,0.02), rgba(0,0,0,0.00))",
+          boxShadow: "0 18px 40px rgba(0,0,0,0.06)",
+          textAlign: "center",
         }}
       >
-        {/* Left: copy */}
-        <div>
-          <h1
-            style={{
-              fontSize: 44,
-              margin: "0 0 10px",
-              lineHeight: 1.06,
-              letterSpacing: "-0.7px",
-              fontWeight: 950,
-            }}
-          >
-            Write a change order.
-            <br />
-            Print it. Get it signed.
-          </h1>
+        <h1
+          style={{
+            fontSize: 48,
+            margin: "0 0 12px",
+            lineHeight: 1.05,
+            letterSpacing: "-0.9px",
+            fontWeight: 900,
+          }}
+        >
+          Change orders in seconds.
+          <br />
+          <span style={{ fontWeight: 900 }}>Print-ready. Signature-ready.</span>
+        </h1>
 
-          <p
-            style={{
-              fontSize: 18,
-              color: "#444",
-              margin: "0 0 16px",
-              lineHeight: 1.55,
-              maxWidth: 560,
-            }}
-          >
-            No templates, no formatting. Type the scope and get a clean PDF your
-            client can approve on the spot.
-          </p>
+        <p
+          style={{
+            fontSize: 18,
+            color: "#444",
+            maxWidth: 760,
+            margin: "0 auto",
+            lineHeight: 1.55,
+          }}
+        >
+          Type the scope. Review the numbers. Download a clean PDF your client
+          can approve on the spot.
+        </p>
 
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <Link href="/app">
-              <button
-                style={{
-                  padding: "14px 18px",
-                  fontSize: 16,
-                  background: "#000",
-                  color: "#fff",
-                  border: "none",
-                  borderRadius: 12,
-                  cursor: "pointer",
-                  fontWeight: 900,
-                }}
-              >
-                Generate a Change Order
-              </button>
-            </Link>
-
-            <Link href="/app">
-              <button
-                style={{
-                  padding: "14px 18px",
-                  fontSize: 16,
-                  background: "#fff",
-                  color: "#111",
-                  border: "1px solid #ddd",
-                  borderRadius: 12,
-                  cursor: "pointer",
-                  fontWeight: 800,
-                }}
-              >
-                Create an Invoice
-              </button>
-            </Link>
-          </div>
-
-          <div style={{ fontSize: 13, color: "#666", marginTop: 10 }}>
-            Free to try — no credit card required
-          </div>
-
-          {/* Spec strip */}
-          <div
-            style={{
-              marginTop: 18,
-              padding: 14,
-              borderRadius: 14,
-              border: "1px solid #e6e6e6",
-              background: "#fafafa",
-              display: "grid",
-              gap: 10,
-            }}
-          >
-            <div style={{ fontWeight: 900, fontSize: 13 }}>What you get</div>
-
-            <div
+        <div style={{ marginTop: 20 }}>
+          <Link href="/app">
+            <button
               style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-                gap: 10,
-                fontSize: 13,
-                color: "#111",
+                padding: "14px 18px",
+                fontSize: 16,
+                background: "#000",
+                color: "#fff",
+                border: "none",
+                borderRadius: 12,
+                cursor: "pointer",
+                fontWeight: 800,
+                boxShadow: "0 14px 30px rgba(0,0,0,0.18)",
               }}
             >
-              <div>✅ Print-ready PDF</div>
-              <div>✅ Signature lines included</div>
-              <div>✅ Clear pricing summary</div>
-              <div>✅ Works on mobile or desktop</div>
-            </div>
+              Generate a Change Order
+            </button>
+          </Link>
+
+          <div style={{ marginTop: 10, fontSize: 13, color: "#666" }}>
+            Free to try — no credit card required
           </div>
         </div>
 
-        {/* Right: screenshot */}
-        <div>
-          <div
-            style={{
-              fontSize: 12,
-              color: "#666",
-              marginBottom: 8,
-              fontWeight: 700,
-            }}
-          >
-            Example output (what your client sees)
-          </div>
-
-          <div
-            style={{
-              borderRadius: 16,
-              overflow: "hidden",
-              border: "1px solid #e6e6e6",
-              background: "#fff",
-              boxShadow: "0 20px 40px rgba(0,0,0,0.10)",
-            }}
-          >
-            <img
-              src="/screenshot.png"
-              alt="Example of a print-ready change order generated in seconds"
-              style={{ width: "100%", display: "block" }}
-            />
-          </div>
-
-          <div style={{ fontSize: 12, color: "#666", marginTop: 8 }}>
-            Clean scope, clean totals, signatures ready.
-          </div>
+        {/* Trust chips */}
+        <div
+          style={{
+            display: "flex",
+            gap: 10,
+            justifyContent: "center",
+            flexWrap: "wrap",
+            marginTop: 22,
+          }}
+        >
+          {[
+            "✅ Print-ready PDF",
+            "🖊️ Signature lines included",
+            "💰 Pricing you can adjust",
+            "📱 Works on phone or desktop",
+          ].map((t) => (
+            <div
+              key={t}
+              style={{
+                fontSize: 13,
+                padding: "8px 12px",
+                borderRadius: 999,
+                border: "1px solid #e9e9e9",
+                background: "#fff",
+                color: "#111",
+                fontWeight: 650,
+              }}
+            >
+              {t}
+            </div>
+          ))}
         </div>
       </section>
 
-      {/* WHY */}
+      {/* PREVIEW */}
       <section style={{ marginTop: 44 }}>
-        <h2 style={{ marginBottom: 10 }}>Why contractors use JobEstimate Pro</h2>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "flex-end",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
+          <h2 style={{ margin: 0, fontSize: 20, letterSpacing: "-0.2px" }}>
+            Example output
+          </h2>
+          <div style={{ fontSize: 12, color: "#666" }}>
+            Clean formatting. Clear scope. Pricing summary. Signatures.
+          </div>
+        </div>
+
+        <div
+          style={{
+            marginTop: 14,
+            borderRadius: 18,
+            overflow: "hidden",
+            border: "1px solid #e7e7e7",
+            background: "#fff",
+            boxShadow: "0 26px 60px rgba(0,0,0,0.12)",
+          }}
+        >
+          <img
+            src="/screenshot.png"
+            alt="Example of a print-ready change order generated in seconds"
+            style={{
+              width: "100%",
+              display: "block",
+            }}
+          />
+        </div>
+
+        <p style={{ fontSize: 13, color: "#666", marginTop: 10 }}>
+          Generate, download, and get it signed — without fighting templates.
+        </p>
+      </section>
+
+      {/* WHY */}
+      <section
+        style={{
+          marginTop: 56,
+          paddingTop: 26,
+          borderTop: "1px solid #eee",
+        }}
+      >
+        <h2 style={{ marginBottom: 14 }}>Why contractors use JobEstimate Pro</h2>
 
         <div
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
-            gap: 12,
+            gap: 14,
+            marginTop: 12,
           }}
         >
           {[
             {
               title: "Looks professional",
-              text: "Clients take it seriously because it looks like a real document.",
+              text: "Clean, print-ready documents that clients take seriously.",
             },
             {
               title: "Saves time",
-              text: "No formatting or templates — just type the work and generate.",
+              text: "No formatting. No templates. Just type the scope and go.",
             },
             {
               title: "Gets approved faster",
               text: "Clear scope + clear pricing + signature-ready PDF.",
             },
             {
-              title: "Made for real jobs",
-              text: "Use it on-site or at home. Simple, fast, and clean.",
+              title: "Built for the field",
+              text: "Works on your phone or laptop — on site or at home.",
             },
           ].map((c) => (
             <div
               key={c.title}
               style={{
-                padding: 14,
-                borderRadius: 14,
+                padding: 16,
                 border: "1px solid #eee",
+                borderRadius: 14,
                 background: "#fff",
               }}
             >
-              <div style={{ fontWeight: 950 }}>{c.title}</div>
+              <div style={{ fontWeight: 900 }}>{c.title}</div>
               <div style={{ marginTop: 6, color: "#555", lineHeight: 1.55 }}>
                 {c.text}
               </div>
@@ -250,10 +246,16 @@ export default function HomePage() {
       </section>
 
       {/* HOW */}
-      <section style={{ marginTop: 44 }}>
-        <h2 style={{ marginBottom: 10 }}>How it works</h2>
+      <section
+        style={{
+          marginTop: 56,
+          paddingTop: 26,
+          borderTop: "1px solid #eee",
+        }}
+      >
+        <h2 style={{ marginBottom: 14 }}>How it works</h2>
 
-        <div style={{ display: "grid", gap: 10 }}>
+        <div style={{ display: "grid", gap: 12 }}>
           {[
             {
               n: "1",
@@ -263,7 +265,7 @@ export default function HomePage() {
             {
               n: "2",
               title: "Review pricing",
-              text: "Adjust labor, materials, markup — whatever matches the job.",
+              text: "Adjust labor, materials, and markup if needed.",
             },
             {
               n: "3",
@@ -293,14 +295,13 @@ export default function HomePage() {
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  fontWeight: 950,
+                  fontWeight: 900,
                 }}
               >
                 {s.n}
               </div>
-
               <div>
-                <div style={{ fontWeight: 950 }}>{s.title}</div>
+                <div style={{ fontWeight: 900 }}>{s.title}</div>
                 <div style={{ color: "#555", marginTop: 4, lineHeight: 1.55 }}>
                   {s.text}
                 </div>
@@ -313,49 +314,41 @@ export default function HomePage() {
       {/* BOTTOM CTA */}
       <section
         style={{
-          marginTop: 50,
-          paddingTop: 18,
+          marginTop: 56,
+          paddingTop: 26,
           borderTop: "1px solid #eee",
+          textAlign: "center",
         }}
       >
-        <div style={{ fontSize: 18, fontWeight: 950 }}>
-          Stop wasting time on templates.
-        </div>
-        <div style={{ marginTop: 6, color: "#555" }}>
+        <h2 style={{ marginBottom: 8 }}>Stop wasting time on templates.</h2>
+        <p style={{ marginTop: 0, color: "#555" }}>
           Make it clean. Make it clear. Get it approved.
-        </div>
+        </p>
 
-        <div style={{ marginTop: 14 }}>
-          <Link href="/app">
-            <button
-              style={{
-                padding: "14px 18px",
-                fontSize: 16,
-                background: "#000",
-                color: "#fff",
-                border: "none",
-                borderRadius: 12,
-                cursor: "pointer",
-                fontWeight: 950,
-              }}
-            >
-              Open JobEstimate Pro
-            </button>
-          </Link>
-        </div>
+        <Link href="/app">
+          <button
+            style={{
+              marginTop: 10,
+              padding: "14px 18px",
+              fontSize: 16,
+              background: "#000",
+              color: "#fff",
+              border: "none",
+              borderRadius: 12,
+              cursor: "pointer",
+              fontWeight: 900,
+            }}
+          >
+            Open JobEstimate Pro
+          </button>
+        </Link>
       </section>
 
       {/* FOOTER */}
-      <footer
-        style={{
-          marginTop: 46,
-          paddingTop: 18,
-          borderTop: "1px solid #eee",
-          fontSize: 12,
-          color: "#777",
-        }}
-      >
-        Professional documents. Real-world jobs. Built to get approved.
+      <footer style={{ marginTop: 60, paddingTop: 18, borderTop: "1px solid #eee" }}>
+        <div style={{ fontSize: 12, color: "#777", textAlign: "center" }}>
+          Professional documents. Real-world jobs. Built to get approved.
+        </div>
       </footer>
     </main>
   )
