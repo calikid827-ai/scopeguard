@@ -71,7 +71,7 @@ export default function HomePage() {
             fontWeight: 900,
           }}
         >
-          Change orders in seconds.
+          Change orders & Estimates in seconds.
           <br />
           <span style={{ fontWeight: 900 }}>Print-ready. Signature-ready.</span>
         </h1>

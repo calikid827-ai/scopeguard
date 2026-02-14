@@ -1,6 +1,7 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import React from "react"
 
 type PaintScope = "walls" | "walls_ceilings" | "full"
 type EffectivePaintScope = PaintScope | "doors_only"
@@ -84,6 +85,14 @@ type Invoice = {
   subtotal: number
   total: number
   notes: string
+    deposit?: {
+    enabled: boolean
+    type: "percent" | "fixed"
+    value: number
+    depositDue: number
+    remainingBalance: number
+    estimateTotal: number
+  }
 }
 
   // -------------------------
@@ -181,6 +190,12 @@ type EstimateHistoryItem = {
   }
   pricingSource?: PricingSource
   priceGuardVerified?: boolean
+
+    deposit?: {
+    enabled: boolean
+    type: "percent" | "fixed"
+    value: number
+  }
 }
 
 const [history, setHistory] = useState<EstimateHistoryItem[]>([])
@@ -290,11 +305,14 @@ useEffect(() => {
   // Company profile (persisted)
   // -------------------------
   const [companyProfile, setCompanyProfile] = useState({
-    name: "",
-    address: "",
-    phone: "",
-    email: "",
-  })
+  name: "",
+  address: "",
+  phone: "",
+  email: "",
+  logo: "",
+  license: "",
+  paymentTerms: "Due upon approval.",
+})
 
   useEffect(() => {
   if (typeof window === "undefined") return
@@ -369,6 +387,13 @@ useEffect(() => {
       markup: Number(x?.pricing?.markup ?? 0),
       total: Number(x?.pricing?.total ?? 0),
     },
+        deposit: x?.deposit
+      ? {
+          enabled: Boolean(x.deposit.enabled),
+          type: x.deposit.type === "fixed" ? "fixed" : "percent",
+          value: Number(x.deposit.value || 0),
+        }
+      : undefined,
     pricingSource: (x?.pricingSource as PricingSource) ?? "ai",
     priceGuardVerified: Boolean(x?.priceGuardVerified),
   }))
@@ -440,6 +465,32 @@ const effectivePaintScope: EffectivePaintScope =
     markup: 20,
     total: 0,
   })
+
+  // -------------------------
+// Deposit (optional)
+// -------------------------
+const [depositEnabled, setDepositEnabled] = useState(false)
+const [depositType, setDepositType] = useState<"percent" | "fixed">("percent")
+const [depositValue, setDepositValue] = useState<number>(25)
+
+// Derived amounts (based on current total)
+const depositDue = useMemo(() => {
+  const total = Number(pricing.total || 0)
+  if (!depositEnabled || total <= 0) return 0
+
+  if (depositType === "percent") {
+    const pct = Math.max(0, Math.min(100, Number(depositValue || 0)))
+    return Math.round(total * (pct / 100))
+  }
+
+  const fixed = Math.max(0, Number(depositValue || 0))
+  return Math.min(total, Math.round(fixed))
+}, [depositEnabled, depositType, depositValue, pricing.total])
+
+const remainingBalance = useMemo(() => {
+  const total = Number(pricing.total || 0)
+  return Math.max(0, total - depositDue)
+}, [pricing.total, depositDue])
   
   const [pricingSource, setPricingSource] = useState<PricingSource>("ai")
   const [pricingEdited, setPricingEdited] = useState(false)
@@ -646,6 +697,14 @@ saveToHistory({
   },
   pricingSource: nextPricingSource,
   priceGuardVerified: nextVerified,
+
+    deposit: depositEnabled
+  ? {
+      enabled: true,
+      type: depositType,
+      value: Number(depositValue || 0),
+    }
+  : undefined,
 })
 
 await checkEntitlementNow()
@@ -731,6 +790,17 @@ function loadHistoryItem(item: EstimateHistoryItem) {
   setResult(item.result || "")
   setPricing(item.pricing)
 
+    // restore deposit settings (if present)
+  if (item.deposit) {
+    setDepositEnabled(Boolean(item.deposit.enabled))
+    setDepositType(item.deposit.type === "fixed" ? "fixed" : "percent")
+    setDepositValue(Number(item.deposit.value || 0))
+  } else {
+    setDepositEnabled(false)
+    setDepositType("percent")
+    setDepositValue(25)
+  }
+  
   const src = (item.pricingSource ?? "ai") as PricingSource
   setPricingSource(src)
 
@@ -752,6 +822,9 @@ function loadHistoryItem(item: EstimateHistoryItem) {
     const companyAddress = companyProfile.address?.trim() || ""
     const companyPhone = companyProfile.phone?.trim() || ""
     const companyEmail = companyProfile.email?.trim() || ""
+    const companyLicense = companyProfile.license?.trim() || ""
+    const paymentTerms = companyProfile.paymentTerms?.trim() || "Due upon approval."
+    const companyLogo = companyProfile.logo || ""
     const clientName = jobDetails.clientName?.trim() || ""
     const jobName = jobDetails.jobName?.trim() || ""
     const jobAddress = jobDetails.jobAddress?.trim() || ""
@@ -965,11 +1038,21 @@ function loadHistoryItem(item: EstimateHistoryItem) {
               <div class="brandTag">Professional change orders & estimates — generated instantly.</div>
             </div>
             <div class="company">
-              <div style="font-weight:700; font-size:16px; color:#111;">${esc(companyName)}</div>
-              ${companyAddress ? `<div>${esc(companyAddress)}</div>` : ""}
-              ${companyPhone ? `<div>${esc(companyPhone)}</div>` : ""}
-              ${companyEmail ? `<div>${esc(companyEmail)}</div>` : ""}
-            </div>
+  ${
+    companyLogo
+      ? `<img src="${companyLogo}" style="max-height:42px; margin-bottom:6px;" />`
+      : ""
+  }
+
+  <div style="font-weight:700; font-size:16px; color:#111;">
+    ${esc(companyName)}
+  </div>
+
+  ${companyAddress ? `<div>${esc(companyAddress)}</div>` : ""}
+  ${companyPhone ? `<div>${esc(companyPhone)}</div>` : ""}
+  ${companyLicense ? `<div><strong>License #:</strong> ${esc(companyLicense)}</div>` : ""}
+  ${companyEmail ? `<div>${esc(companyEmail)}</div>` : ""}
+</div>
           </div>
 
           <h1>${esc(documentType || "Change Order / Estimate")}
@@ -1011,6 +1094,12 @@ function loadHistoryItem(item: EstimateHistoryItem) {
               <tr><td>Other / Mobilization</td><td style="text-align:right;">$${Number(pricing.subs || 0).toLocaleString()}</td></tr>
               <tr><td>Markup</td><td style="text-align:right;">${Number(pricing.markup || 0)}%</td></tr>
               <tr class="totalRow"><td>Total</td><td style="text-align:right;">$${Number(pricing.total || 0).toLocaleString()}</td></tr>
+                            ${
+                depositEnabled
+                  ? `<tr><td>Deposit Due Now</td><td style="text-align:right;">$${Number(depositDue || 0).toLocaleString()}</td></tr>
+                     <tr><td>Remaining Balance</td><td style="text-align:right;">$${Number(remainingBalance || 0).toLocaleString()}</td></tr>`
+                  : ""
+              }
             </table>
 
             ${pdfEdited ? `
@@ -1067,7 +1156,7 @@ function loadHistoryItem(item: EstimateHistoryItem) {
 
     <div class="approvalNote">
       By signing above, the customer approves the scope of work and pricing described in this document.
-      Payment terms: <strong>Due upon approval.</strong>
+      Payment terms: <strong>${esc(paymentTerms)}</strong>
     </div>
   </div>
 </div>
@@ -1185,7 +1274,18 @@ function loadHistoryItem(item: EstimateHistoryItem) {
           </table>
         </div>
 
-        ${inv.notes ? `<div class="box"><strong>Notes:</strong> ${esc(inv.notes)}</div>` : ""}
+        ${
+  inv.deposit?.enabled
+    ? `<div class="box">
+         <strong>Deposit Invoice:</strong><br/>
+         Estimate Total: ${money(inv.deposit.estimateTotal)}<br/>
+         Deposit Due Now: ${money(inv.deposit.depositDue)}<br/>
+         Remaining Balance: ${money(inv.deposit.remainingBalance)}
+       </div>`
+    : ""
+}
+
+${inv.notes ? `<div class="box"><strong>Notes:</strong> ${esc(inv.notes)}</div>` : ""}
 
         <div class="approvalsRow">
           <div class="approval">
@@ -1252,7 +1352,7 @@ function toISODate(d: Date) {
 function createInvoiceFromEstimate(est: EstimateHistoryItem) {
   const issue = new Date()
   const due = new Date()
-  due.setDate(due.getDate() + 7) // default: 7 days
+  due.setDate(due.getDate() + 7)
 
   const client = est?.jobDetails?.clientName || jobDetails.clientName || "Client"
   const jobNm = est?.jobDetails?.jobName || jobDetails.jobName || "Job"
@@ -1261,14 +1361,42 @@ function createInvoiceFromEstimate(est: EstimateHistoryItem) {
   const labor = Number(est?.pricing?.labor || 0)
   const materials = Number(est?.pricing?.materials || 0)
   const subs = Number(est?.pricing?.subs || 0)
+  const subtotal = labor + materials + subs
   const total = Number(est?.pricing?.total || 0)
 
-  const lineItems: { label: string; amount: number }[] = []
-  if (labor) lineItems.push({ label: "Labor", amount: labor })
-  if (materials) lineItems.push({ label: "Materials", amount: materials })
-  if (subs) lineItems.push({ label: "Other / Mobilization", amount: subs })
+  // --- deposit calculation (from the estimate snapshot) ---
+  const depEnabled = Boolean(est.deposit?.enabled)
+  const depType = est.deposit?.type === "fixed" ? "fixed" : "percent"
+  const depValue = Number(est.deposit?.value || 0)
 
-  const subtotal = labor + materials + subs
+  const estimateTotal = Number(est?.pricing?.total || 0)
+  let depDue = 0
+
+  if (depEnabled && estimateTotal > 0) {
+    if (depType === "percent") {
+      const pct = Math.max(0, Math.min(100, depValue))
+      depDue = Math.round(estimateTotal * (pct / 100))
+    } else {
+      depDue = Math.min(estimateTotal, Math.round(Math.max(0, depValue)))
+    }
+  }
+
+  const depRemain = Math.max(0, estimateTotal - depDue)
+
+  // --- build line items ---
+  const lineItems: { label: string; amount: number }[] = []
+
+  if (depEnabled) {
+    const label =
+      depType === "percent"
+        ? `Deposit (${Math.max(0, Math.min(100, depValue))}% of estimate total)`
+        : `Deposit (fixed amount)`
+    lineItems.push({ label, amount: depDue })
+  } else {
+    if (labor) lineItems.push({ label: "Labor", amount: labor })
+    if (materials) lineItems.push({ label: "Materials", amount: materials })
+    if (subs) lineItems.push({ label: "Other / Mobilization", amount: subs })
+  }
 
   const inv: Invoice = {
     id: crypto.randomUUID(),
@@ -1281,9 +1409,26 @@ function createInvoiceFromEstimate(est: EstimateHistoryItem) {
     jobName: jobNm,
     jobAddress: jobAddr,
     lineItems,
-    subtotal,
-    total: total || subtotal, // if your estimate total exists, use it
-    notes: "Payment terms: Due upon approval.",
+
+    subtotal: depEnabled ? depDue : subtotal,
+    total: depEnabled ? depDue : (total || subtotal),
+
+    notes: depEnabled
+      ? `Deposit invoice. Remaining balance after deposit: $${Number(depRemain || 0).toLocaleString()}. Payment terms: ${
+          companyProfile.paymentTerms?.trim() || "Due upon approval."
+        }`
+      : `Payment terms: ${companyProfile.paymentTerms?.trim() || "Due upon approval."}`,
+
+    deposit: depEnabled
+      ? {
+          enabled: true,
+          type: depType,
+          value: depValue,
+          depositDue: depDue,
+          remainingBalance: depRemain,
+          estimateTotal,
+        }
+      : undefined,
   }
 
   setInvoices((prev) => [inv, ...prev])
@@ -1518,7 +1663,7 @@ const sub =
 
       <input
   type="email"
-  placeholder="Email used at checkout"
+  placeholder="Enter your email to generate documents"
   value={email}
   onChange={(e) => setEmail(e.target.value)}
   onBlur={checkEntitlementNow}
@@ -1552,6 +1697,65 @@ const sub =
           style={{ width: "100%", padding: 8, marginBottom: 8 }}
         />
       ))}
+
+      <label style={{ fontSize: 13, fontWeight: 600 }}>
+  Company Logo (optional)
+</label>
+
+<input
+  type="file"
+  accept="image/*"
+  onChange={(e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onloadend = () => {
+      setCompanyProfile((prev) => ({
+        ...prev,
+        logo: reader.result as string,
+      }))
+    }
+    reader.readAsDataURL(file)
+  }}
+  style={{ width: "100%", padding: 8, marginBottom: 8 }}
+/>
+
+{companyProfile.logo && (
+  <img
+    src={companyProfile.logo}
+    alt="Company logo preview"
+    style={{
+      maxHeight: 60,
+      marginBottom: 12,
+      objectFit: "contain",
+    }}
+  />
+)}
+
+<input
+  placeholder="Contractor License # (optional)"
+  value={(companyProfile as any).license || ""}
+  onChange={(e) =>
+    setCompanyProfile({
+      ...companyProfile,
+      license: e.target.value,
+    })
+  }
+  style={{ width: "100%", padding: 8, marginBottom: 8 }}
+/>
+
+<textarea
+  placeholder="Default payment terms (optional) — shown on PDFs & invoices"
+  value={(companyProfile as any).paymentTerms || ""}
+  onChange={(e) =>
+    setCompanyProfile({
+      ...companyProfile,
+      paymentTerms: e.target.value,
+    })
+  }
+  style={{ width: "100%", padding: 8, marginBottom: 8, height: 70 }}
+/>
 
       <h3 style={{ marginTop: 18 }}>Job Details</h3>
 
@@ -2213,6 +2417,64 @@ const sub =
     flexWrap: "wrap",
   }}
 >
+
+{/* -------------------------
+    Deposit (optional)
+------------------------- */}
+<div
+  style={{
+    marginTop: 12,
+    padding: 12,
+    border: "1px solid #e5e7eb",
+    borderRadius: 10,
+    background: "#fff",
+  }}
+>
+  <label style={{ display: "flex", alignItems: "center", gap: 10 }}>
+    <input
+      type="checkbox"
+      checked={depositEnabled}
+      onChange={(e) => setDepositEnabled(e.target.checked)}
+    />
+    <span style={{ fontWeight: 800 }}>Require deposit</span>
+    <span style={{ fontSize: 12, color: "#666" }}>
+      (shows on PDF + invoices)
+    </span>
+  </label>
+
+  {depositEnabled && (
+    <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 10 }}>
+        <select
+          value={depositType}
+          onChange={(e) => setDepositType(e.target.value as any)}
+          style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
+        >
+          <option value="percent">Percent (%)</option>
+          <option value="fixed">Fixed ($)</option>
+        </select>
+
+        <input
+          type="number"
+          value={depositValue === 0 ? "" : depositValue}
+          onChange={(e) => setDepositValue(e.target.value === "" ? 0 : Number(e.target.value))}
+          placeholder={depositType === "percent" ? "e.g., 25" : "e.g., 500"}
+          style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
+        />
+      </div>
+
+      <div style={{ fontSize: 13, color: "#333", display: "grid", gap: 4 }}>
+        <div>
+          Deposit Due Now: <strong>${Number(depositDue || 0).toLocaleString()}</strong>
+        </div>
+        <div>
+          Remaining Balance: <strong>${Number(remainingBalance || 0).toLocaleString()}</strong>
+        </div>
+      </div>
+    </div>
+  )}
+</div>
+
   <div style={{ fontSize: 16, fontWeight: 800 }}>
     Total: ${Number(pricing.total || 0).toLocaleString()}
   </div>
