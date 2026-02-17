@@ -192,11 +192,32 @@ function buildPriceGuardReport(args: {
   }
 }
 
+type PricingUnit =
+  | "sqft"
+  | "linear_ft"
+  | "rooms"
+  | "doors"
+  | "fixtures"
+  | "devices"
+  | "days"
+  | "lump_sum"
+
+type EstimateBasis = {
+  units: PricingUnit[]                 // 1–3 items
+  quantities: Partial<Record<PricingUnit, number>>
+  laborRate: number                    // hourly
+  hoursPerUnit?: number                // optional when unit-based
+  crewDays?: number                    // optional when days-based
+  mobilization: number
+  assumptions: string[]
+}
+
 type AIResponse = {
   documentType: "Change Order" | "Estimate" | "Change Order / Estimate"
   trade: string
   description: string
   pricing: Pricing
+  estimateBasis?: EstimateBasis        // ✅ internal-only, optional
 }
 
 type AnchorResult = {
@@ -222,6 +243,36 @@ type PricingAnchor = {
 // -----------------------------
 // HELPERS
 // -----------------------------
+
+function defaultDeterministicDescription(args: {
+  documentType: "Change Order" | "Estimate" | "Change Order / Estimate"
+  trade: string
+  scopeText: string
+  jobType?: string | null
+}): string {
+  const dt = args.documentType
+  const t = args.trade
+  const s = (args.scopeText || "").trim()
+
+  if (t === "plumbing" && args.jobType === "fixture_swaps") {
+    return `This ${dt} covers fixture-level plumbing work as described, including isolation, removal and replacement, reconnection, functional testing, and cleanup. Scope: ${s}`
+  }
+
+  if (t === "electrical" && args.jobType === "device_work") {
+    return `This ${dt} covers device-level electrical work as described, including replacement/installation of devices, protection of surrounding finishes, testing, and cleanup. Scope: ${s}`
+  }
+
+  if (t === "flooring") {
+    return `This ${dt} covers flooring installation work as described, including surface preparation, layout, installation, transitions as applicable, and cleanup. Scope: ${s}`
+  }
+
+  if (t === "drywall") {
+    return `This ${dt} covers drywall repair work as described, including preparation, patching, finishing, and cleanup. Scope: ${s}`
+  }
+
+  return `This ${dt} covers the described scope of work as provided, including labor, materials, protection, and cleanup. Scope: ${s}`
+}
+
 function isValidPricing(p: any): p is Pricing {
   return (
     typeof p?.labor === "number" &&
@@ -253,6 +304,519 @@ function clampPricing(pricing: Pricing): Pricing {
     markup: Math.min(25, Math.max(15, pricing.markup)),
     total: Math.min(MAX_TOTAL, Math.max(0, pricing.total)),
   }
+}
+
+function isValidEstimateBasis(b: any): b is EstimateBasis {
+  if (!b || typeof b !== "object") return false
+  if (!Array.isArray(b.units) || b.units.length < 1 || b.units.length > 3) return false
+  if (!b.quantities || typeof b.quantities !== "object") return false
+  if (!Number.isFinite(Number(b.laborRate)) || Number(b.laborRate) <= 0) return false
+  if (!Number.isFinite(Number(b.mobilization)) || Number(b.mobilization) < 0) return false
+  if (!Array.isArray(b.assumptions)) return false
+  return true
+}
+
+function approxEqual(a: number, b: number, pct = 0.08) {
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false
+  if (b === 0) return a === 0
+  return Math.abs(a - b) / Math.abs(b) <= pct
+}
+
+type JobComplexityClass = "simple" | "medium" | "complex" | "remodel"
+
+type ComplexityProfile = {
+  class: JobComplexityClass
+  requireDaysBasis: boolean
+  permitLikely: boolean
+  multiPhase: boolean
+  multiTrade: boolean
+  hasDemo: boolean
+  notes: string[]
+
+  // guard rails for pricing structure
+  minCrewDays: number
+  maxCrewDays: number
+  minMobilization: number
+  minSubs: number
+
+  // ✅ NEW: crew realism
+  crewSizeMin: number
+  crewSizeMax: number
+  hoursPerDayEffective: number // productive hours per person/day (6–8 typical)
+  minPhaseVisits: number       // how many "show-ups" (return trips) implied
+}
+
+function buildComplexityProfile(args: { scopeText: string; trade: string }): ComplexityProfile {
+  const s = (args.scopeText || "").toLowerCase()
+  const trade = (args.trade || "").toLowerCase()
+
+  const notes: string[] = []
+
+  const hasDemo =
+    /\b(demo|demolition|tear\s*out|remove\s+existing|haul\s*away|dispose|dump)\b/.test(s)
+
+  const remodelSignals =
+    /\b(remodel|renovation|gut|rebuild|full\s*replace|convert|conversion)\b/.test(s)
+
+  const permitSignals =
+    /\b(permit|inspection|inspector|code|required|city)\b/.test(s) ||
+    /\b(panel|service\s*upgrade|meter|subpanel)\b/.test(s)
+
+  const roughInOrRelocate =
+    /\b(rough[-\s]*in|relocat(e|ing|ion)|move\s+(drain|supply|valve|line)|new\s+circuit|run\s+new\s+wire|trench)\b/.test(s)
+
+  const wetAreaSignals =
+    /\b(shower|tub|pan|curb|waterproof|membrane|red\s*guard|cement\s*board|durock|hardie(backer)?|thinset|mud\s*bed)\b/.test(s)
+
+  const multiPhase =
+    hasDemo || roughInOrRelocate || wetAreaSignals || permitSignals
+
+  const multiTradeSignals =
+    /\b(plumb|plumbing)\b/.test(s) &&
+    /\b(electric|electrical)\b/.test(s)
+
+  const finishTradeSignals =
+    /\b(tile|backsplash|cabinet|counter(top)?|floor|flooring|drywall|paint|painting|trim|baseboard)\b/.test(s)
+
+  const multiTrade = multiTradeSignals || (remodelSignals && finishTradeSignals)
+
+  // --- classify ---
+  let cls: JobComplexityClass = "simple"
+
+  // “remodel” wins
+  if (remodelSignals || (wetAreaSignals && hasDemo)) {
+    cls = "remodel"
+    notes.push("Remodel / rebuild signals detected.")
+  } else if (permitSignals || roughInOrRelocate) {
+    cls = "complex"
+    notes.push("Permit/rough-in/relocation signals detected.")
+  } else if (hasDemo || multiTrade) {
+    cls = "medium"
+    notes.push("Demo or multi-trade coordination signals detected.")
+  } else {
+    cls = "simple"
+  }
+
+  const permitLikely = permitSignals
+  if (permitLikely) notes.push("Permit/inspection likely.")
+
+  if (hasDemo) notes.push("Demolition/haul-away implied.")
+  if (roughInOrRelocate) notes.push("Rough-in or relocation scope implied.")
+  if (wetAreaSignals) notes.push("Wet-area / waterproofing signals detected.")
+  if (multiTrade) notes.push("Multi-trade coordination likely.")
+
+  // --- force “days” basis for complex/remodel (and for heavy electrical/plumbing patterns) ---
+  const requireDaysBasis =
+    cls === "complex" ||
+    cls === "remodel" ||
+    (trade === "electrical" && /\b(panel|service\s*upgrade|rewire)\b/.test(s)) ||
+    (trade === "plumbing" && /\b(rough[-\s]*in|relocat|move\s+drain|move\s+supply)\b/.test(s))
+
+  // --- guardrail minimums by class ---
+  // These are intentionally forgiving but block “0.5 day remodels”
+  const bands =
+  cls === "simple"
+    ? {
+        minCrewDays: 0.5, maxCrewDays: 3,
+        minMobilization: 175, minSubs: 175,
+        crewSizeMin: 1, crewSizeMax: 2,
+        hoursPerDayEffective: 7,
+        minPhaseVisits: 1,
+      }
+    : cls === "medium"
+      ? {
+          minCrewDays: 1, maxCrewDays: 7,
+          minMobilization: 350, minSubs: 350,
+          crewSizeMin: 1, crewSizeMax: 3,
+          hoursPerDayEffective: 7,
+          minPhaseVisits: 1,
+        }
+      : cls === "complex"
+        ? {
+            minCrewDays: 2, maxCrewDays: 14,
+            minMobilization: 550, minSubs: 550,
+            crewSizeMin: 2, crewSizeMax: 4,
+            hoursPerDayEffective: 6.5,
+            minPhaseVisits: 2, // permits/rough-in => return
+          }
+        : {
+            minCrewDays: 3, maxCrewDays: 25,
+            minMobilization: 750, minSubs: 750,
+            crewSizeMin: 2, crewSizeMax: 5,
+            hoursPerDayEffective: 6.25,
+            minPhaseVisits: 2, // remodels tend to be multi-visit
+          }
+
+  return {
+    class: cls,
+    requireDaysBasis,
+    permitLikely,
+    multiPhase,
+    multiTrade,
+    hasDemo,
+    notes,
+    ...bands,
+  }
+}
+
+function inferPhaseVisitsFromSignals(args: {
+  scopeText: string
+  cp: ComplexityProfile | null
+}): { visits: number; phases: string[] } {
+  const s = (args.scopeText || "").toLowerCase()
+  const cp = args.cp
+
+  const phases: string[] = []
+
+  const hasDemo =
+    /\b(demo|demolition|tear\s*out|remove\s+existing|haul\s*away|dispose|dump)\b/.test(s)
+
+  const hasRoughOrRelocate =
+    /\b(rough[-\s]*in|relocat(e|ing|ion)|move\s+(drain|supply|valve|line)|new\s+circuit|run\s+new\s+wire|trench)\b/.test(s)
+
+  const hasWetArea =
+    /\b(shower|tub|pan|curb|waterproof|membrane|red\s*guard|cement\s*board|durock|hardie(backer)?|thinset|mud\s*bed)\b/.test(s)
+
+  const hasPermit =
+    /\b(permit|inspection|inspector|code|required|city)\b/.test(s) ||
+    /\b(panel|service\s*upgrade|meter|subpanel)\b/.test(s)
+
+  if (hasDemo) phases.push("demolition/removal")
+  if (hasRoughOrRelocate) phases.push("rough-in/relocation")
+  if (hasPermit) phases.push("permit/inspection coordination")
+  if (hasWetArea) phases.push("wet-area sequencing/cure time")
+
+  // Base visits:
+  // - 1 visit: simple single-trip work
+  // - 2 visits: demo + return, or rough-in + return, or permits
+  // - 3 visits: demo + rough-in + return (common remodel pattern), or wet-area cure
+  let visits = 1
+
+  const signals = [hasDemo, hasRoughOrRelocate, hasPermit, hasWetArea].filter(Boolean).length
+
+  if (signals >= 1) visits = 2
+  if ((hasDemo && hasRoughOrRelocate) || (hasWetArea && (hasDemo || hasRoughOrRelocate))) visits = 3
+
+  // Respect CP minimums (if provided)
+  if (cp?.minPhaseVisits) visits = Math.max(visits, cp.minPhaseVisits)
+
+  return { visits, phases }
+}
+
+function validateCrewAndSequencing(args: {
+  pricing: Pricing
+  basis: EstimateBasis | null
+  cp: ComplexityProfile | null
+  scopeText: string
+}): { ok: boolean; reasons: string[] } {
+  const reasons: string[] = []
+  const p = args.pricing
+  const b = args.basis
+  const cp = args.cp
+
+  if (!cp || !b || !isValidEstimateBasis(b)) return { ok: true, reasons }
+
+  // Only enforce crewDays math when days-based estimate is present
+  const hasDays = Array.isArray(b.units) && b.units.includes("days")
+  if (!hasDays) return { ok: true, reasons }
+
+  const crewDays = Number(b.crewDays ?? b.quantities?.days ?? 0)
+  if (!Number.isFinite(crewDays) || crewDays <= 0) {
+    reasons.push("days-based estimate missing/invalid crewDays.")
+    return { ok: false, reasons }
+  }
+
+  const laborRate = Number(b.laborRate)
+  const laborDollars = Number(p.labor)
+
+  if (!Number.isFinite(laborRate) || laborRate <= 0) {
+    reasons.push("days-based estimate missing/invalid laborRate.")
+    return { ok: false, reasons }
+  }
+  if (!Number.isFinite(laborDollars) || laborDollars <= 0) {
+    reasons.push("days-based estimate missing/invalid labor dollars.")
+    return { ok: false, reasons }
+  }
+
+  const impliedLaborHours = laborDollars / laborRate
+
+  // Choose a conservative “expected crew size” for validation:
+  // Use the MIN crew size so the validation is forgiving (harder to false-flag).
+  const crewSize = Math.max(1, Number(cp.crewSizeMin ?? 1))
+  const hrsPerDay = Math.max(5.5, Math.min(8, Number(cp.hoursPerDayEffective ?? 7)))
+
+  const impliedCrewDays = impliedLaborHours / (crewSize * hrsPerDay)
+
+  if (Number.isFinite(impliedCrewDays) && impliedCrewDays > 0) {
+    // very forgiving tolerance: allow 2.5x mismatch before flagging
+    const ratio = impliedCrewDays / crewDays
+    if (ratio > 2.5 || ratio < 0.4) {
+      reasons.push(
+        `CrewDays inconsistent with labor math: implied ${impliedCrewDays.toFixed(1)} crew-day(s) (crew=${crewSize}, ${hrsPerDay}h/day) vs crewDays=${crewDays}.`
+      )
+    }
+  }
+
+  // Sequencing / multi-visit enforcement (prevents “one trip remodel”)
+  const phase = inferPhaseVisitsFromSignals({ scopeText: args.scopeText, cp })
+  if (phase.visits >= 2) {
+    // Minimum crewDays floor by visit count:
+    // - 2 visits: at least 1.5 crewDays
+    // - 3 visits: at least 2.5 crewDays
+    const minByVisits = phase.visits === 2 ? 1.5 : 2.5
+    if (crewDays < minByVisits && (cp.class === "complex" || cp.class === "remodel")) {
+      reasons.push(
+        `Multi-phase scope implies ${phase.visits} visit(s) (${phase.phases.join(", ")}); crewDays too low (${crewDays}).`
+      )
+    }
+  }
+
+  return { ok: reasons.length === 0, reasons }
+}
+
+function appendExecutionPlanSentence(args: {
+  description: string
+  documentType: string
+  trade: string
+  cp: ComplexityProfile | null
+  basis: EstimateBasis | null
+  scopeText: string
+}): string {
+  let d = (args.description || "").trim()
+  if (!d) return d
+
+  // Avoid adding repeatedly if the route calls twice
+  if (/\bEstimated duration:\b/i.test(d)) return d
+
+  const cp = args.cp
+  const b = args.basis
+  const { visits, phases } = inferPhaseVisitsFromSignals({ scopeText: args.scopeText, cp })
+
+  // If we have days, state them. Otherwise skip duration sentence.
+  const hasDays = !!(b && Array.isArray(b.units) && b.units.includes("days"))
+  const cd = Number(b?.crewDays ?? b?.quantities?.days ?? 0)
+
+  // Only add when it’s meaningful
+  if (!hasDays || !Number.isFinite(cd) || cd <= 0) return d
+
+  // Round to nearest 0.5 for readability
+  const rounded = Math.round(cd * 2) / 2
+  const dayWord = rounded === 1 ? "day" : "days"
+
+  const phaseText =
+    phases.length > 0
+      ? ` with sequencing for ${phases.slice(0, 3).join(", ")}`
+      : ""
+
+  const visitText =
+    visits >= 2 ? ` across approximately ${visits} site visit(s)` : ""
+
+  // Keep it contract-friendly, not “guarantee-y”
+  const sentence = ` Estimated duration: approximately ${rounded} crew-${dayWord}${visitText}${phaseText}.`
+
+  // Ensure description still begins correctly (your prompt wants “This Estimate…”)
+  d = d.replace(
+    /^This (Change Order|Estimate|Change Order \/ Estimate)\b/,
+    `This ${args.documentType}`
+  )
+
+  return (d + sentence).trim()
+}
+
+function validateAiMath(args: {
+  pricing: Pricing
+  basis: EstimateBasis | null
+  parsedCounts: { rooms: number | null; doors: number | null; sqft: number | null }
+  complexity?: ComplexityProfile | null
+  scopeText?: string // ✅ NEW
+}): { ok: boolean; reasons: string[] } {
+  const reasons: string[] = []
+  const p = args.pricing
+  const b = args.basis
+
+  // -----------------------------
+  // Existing checks (UNCHANGED)
+  // -----------------------------
+
+  // 1) Total must match (tight)
+  const impliedTotal = Math.round((p.labor + p.materials + p.subs) * (1 + p.markup / 100))
+  if (!approxEqual(p.total, impliedTotal, 0.03)) {
+    reasons.push("Total does not match base + markup.")
+  }
+
+  // 2) If no basis, fail (we want unit checking)
+  if (!b || !isValidEstimateBasis(b)) {
+    reasons.push("Missing/invalid estimateBasis.")
+    return { ok: reasons.length === 0, reasons }
+  }
+
+  // 3) Must reflect explicit counts you already parsed (rooms/doors/sqft)
+  if (args.parsedCounts.rooms && args.parsedCounts.rooms > 0) {
+    const q = Number(b.quantities.rooms ?? 0)
+    if (q !== args.parsedCounts.rooms) reasons.push("rooms quantity not carried into estimateBasis.")
+  }
+
+  if (args.parsedCounts.doors && args.parsedCounts.doors > 0) {
+    const q = Number(b.quantities.doors ?? 0)
+    if (q !== args.parsedCounts.doors) reasons.push("doors quantity not carried into estimateBasis.")
+  }
+
+  // (Small upgrade: you already parse sqft — enforce it if present)
+  if (args.parsedCounts.sqft && args.parsedCounts.sqft > 0) {
+    const q = Number(b.quantities.sqft ?? 0)
+    if (q !== args.parsedCounts.sqft) reasons.push("sqft quantity not carried into estimateBasis.")
+  }
+
+  // 4) Mobilization sanity
+  if (b.mobilization < 100 && (args.parsedCounts.doors || args.parsedCounts.rooms || args.parsedCounts.sqft)) {
+    reasons.push("mobilization too low for small job.")
+  }
+
+  // 5) Labor scaling sanity (simple check)
+  const hasCountUnit = b.units.some((u) =>
+    ["doors", "rooms", "devices", "fixtures", "sqft", "linear_ft"].includes(u)
+  )
+  if (hasCountUnit && p.labor <= 0) reasons.push("Labor missing for unit-based estimate.")
+
+  // -----------------------------
+  // NEW: Production-rate sanity locking
+  // -----------------------------
+
+  // Only apply rate-locking when the AI claims ONE primary unit.
+  // Multi-unit bases make "hours per unit" ambiguous and can false-flag.
+  const primaryUnit: PricingUnit | null = Array.isArray(b.units) && b.units.length === 1 ? b.units[0] : null
+
+  // Helper: wide, realistic bounds (intentionally forgiving)
+  const getBands = (unit: PricingUnit): { min: number; max: number; label: string } | null => {
+    switch (unit) {
+      case "doors":
+        return { min: 0.6, max: 2.5, label: "hrs/door" } // wide: paint doors, install doors, etc.
+      case "rooms":
+        return { min: 3.0, max: 18.0, label: "hrs/room" } // wide for repaint vs heavy prep
+      case "sqft":
+        return { min: 0.005, max: 0.25, label: "hrs/sqft" } // 4 sqft/hr (patching) to 200 sqft/hr (painting-ish)
+      case "linear_ft":
+        return { min: 0.02, max: 1.2, label: "hrs/linear_ft" } // baseboard/carpentry can vary a lot
+      case "devices":
+        return { min: 0.20, max: 2.5, label: "hrs/device" } // swaps vs add/troubleshoot
+      case "fixtures":
+        return { min: 0.60, max: 8.0, label: "hrs/fixture" } // faucet vs vanity vs valve
+      case "days":
+        return { min: 0.5, max: 25, label: "crewDays" } // super wide; still blocks 0 or 1000
+      case "lump_sum":
+        return null // can't rate-check lump sums
+      default:
+        return null
+    }
+  }
+
+  // Only attempt if laborRate is sane and labor exists
+  const laborRate = Number(b.laborRate)
+  const laborDollars = Number(p.labor)
+
+  if (
+    primaryUnit &&
+    Number.isFinite(laborRate) &&
+    laborRate > 0 &&
+    Number.isFinite(laborDollars) &&
+    laborDollars > 0
+  ) {
+    const bands = getBands(primaryUnit)
+
+    if (bands) {
+      if (primaryUnit === "days") {
+        // For "days" unit, compare to crewDays (preferred) or quantities.days
+        const cd = Number(b.crewDays ?? b.quantities.days ?? 0)
+        if (!Number.isFinite(cd) || cd <= 0) {
+          reasons.push("days-based estimate missing crewDays/quantities.days.")
+        } else if (cd < bands.min || cd > bands.max) {
+          reasons.push(`Production rate unrealistic: crewDays=${cd} (expected ${bands.min}–${bands.max}).`)
+        } else {
+          // Optional sanity: implied hours shouldn't be wildly inconsistent with crewDays (assume ~8h/day)
+          const impliedLaborHours = laborDollars / laborRate
+          const impliedDaysAt8 = impliedLaborHours / 8
+          if (Number.isFinite(impliedDaysAt8) && impliedDaysAt8 > 0) {
+            // Super forgiving: allow 3x mismatch before flagging
+            const ratio = impliedDaysAt8 / cd
+            if (ratio > 3.0 || ratio < 0.33) {
+              reasons.push(
+                `Labor math inconsistent with crewDays: implied ${(impliedDaysAt8).toFixed(1)} day(s) @8h/day vs crewDays=${cd}.`
+              )
+            }
+          }
+        }
+      } else {
+        // For count/sqft/linear_ft/device/fixture/room/door
+        const qty = Number(b.quantities?.[primaryUnit] ?? 0)
+        if (!Number.isFinite(qty) || qty <= 0) {
+          reasons.push(`${primaryUnit} unit selected but quantity missing/zero in estimateBasis.`)
+        } else {
+          const impliedLaborHours = laborDollars / laborRate
+          const impliedHrsPerUnit = impliedLaborHours / qty
+
+          if (!Number.isFinite(impliedHrsPerUnit) || impliedHrsPerUnit <= 0) {
+            reasons.push(`Invalid implied production rate for ${primaryUnit}.`)
+          } else {
+            if (impliedHrsPerUnit < bands.min || impliedHrsPerUnit > bands.max) {
+              reasons.push(
+                `Production rate unrealistic for ${primaryUnit}: ${impliedHrsPerUnit.toFixed(3)} ${bands.label} (expected ${bands.min}–${bands.max}).`
+              )
+            }
+
+            // If model provided hoursPerUnit, ensure it roughly matches implied math
+            const hpu = Number(b.hoursPerUnit ?? 0)
+            if (Number.isFinite(hpu) && hpu > 0) {
+              if (!approxEqual(hpu, impliedHrsPerUnit, 0.18)) {
+                reasons.push("hoursPerUnit does not match laborRate × quantity math.")
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+    // -----------------------------
+  // NEW: Complexity Profile enforcement
+  // -----------------------------
+  const cp = args.complexity ?? null
+
+  if (cp?.requireDaysBasis) {
+    // Must include "days" + crewDays
+    const hasDaysUnit = Array.isArray(b.units) && b.units.includes("days")
+    if (!hasDaysUnit) reasons.push(`Complexity requires days-based estimateBasis (missing "days" in units).`)
+
+    const cd = Number(b.crewDays ?? b.quantities?.days ?? 0)
+    if (!Number.isFinite(cd) || cd <= 0) {
+      reasons.push("Complexity requires crewDays (missing/invalid crewDays).")
+    } else {
+      if (cd < cp.minCrewDays || cd > cp.maxCrewDays) {
+        reasons.push(
+          `crewDays out of range for ${cp.class}: ${cd} (expected ${cp.minCrewDays}–${cp.maxCrewDays}).`
+        )
+      }
+    }
+  }
+
+  // Mobilization/subs minimums by complexity (for structure realism)
+  if (cp) {
+    if (Number(b.mobilization) < cp.minMobilization) {
+      reasons.push(`mobilization too low for ${cp.class} job (min ${cp.minMobilization}).`)
+    }
+    if (Number(p.subs) < cp.minSubs) {
+      reasons.push(`subs too low for ${cp.class} job (min ${cp.minSubs}).`)
+    }
+  }
+
+  const cs = validateCrewAndSequencing({
+  pricing: p,
+  basis: b,
+  cp: args.complexity ?? null,
+  scopeText: args.scopeText ?? "",
+})
+if (!cs.ok) reasons.push(...cs.reasons)
+
+  return { ok: reasons.length === 0, reasons }
 }
 
 // 🔍 Trade auto-detection
@@ -370,13 +934,14 @@ function priceBathroomRemodelAnchor(args: {
 }): Pricing | null {
   const s = args.scope.toLowerCase()
 
-  // Trigger only when it really looks like a bathroom remodel
   const isBath = parseBathKeyword(s)
-  const isRemodel = /\b(remodel|renovation|gut|rebuild|install)\b/.test(s)
-  if (!isBath || !isRemodel) return null
+  const remodelSignals =
+    /\b(remodel|renovation|gut|rebuild|demo|demolition|tile|waterproof|membrane|shower\s*pan|tub\s*surround|install\s+vanity|relocat(e|ing|ion)|move\s+(drain|valve|supply))\b/.test(s)
 
-  // Prefer measurements sqft; else parse; else small-bath default
-  const sqft =
+  if (!isBath || !remodelSignals) return null
+
+  // Prefer user measurements; else parse; else assume small bath floor area
+  const bathFloorSqft =
     (args.measurements?.totalSqft && args.measurements.totalSqft > 0
       ? Number(args.measurements.totalSqft)
       : null) ??
@@ -384,42 +949,48 @@ function priceBathroomRemodelAnchor(args: {
     60
 
   const hasDemo = parseDemo(s)
-  const hasTile = parseTile(s)
+  const hasWallTile = /\b(tile|wall\s*tile|shower\s*walls?|tub\s*surround)\b/.test(s)
+  const hasWaterproof = /\b(waterproof|membrane|red\s*guard|pan|curb)\b/.test(s)
   const hasVanity = parseHasVanity(s)
-  const hasPaint = /\b(paint|painting|repaint|prime|primer)\b/.test(s)
+  const hasValveRelocate = /\b(relocat(e|ing|ion)|move\s+(the\s*)?valve|relocate\s+valve)\b/.test(s)
 
-  // ---- Tunable anchors (v2) ----
-  const laborRate = 85
+  // Estimate shower wall tile sqft when wall-tile is mentioned
+  // Typical: 3 walls * (5ft wide * 8ft high) ≈ 120 sqft
+  const wallTileSqft = hasWallTile ? 120 : 0
+
+  // ---- Tunable anchors (bath remodel wet-area) ----
+  const laborRate = 115 // was 85 (too low)
   const markup = 25
 
-  const demoLaborHrs = hasDemo ? 10 : 6
-  const demoDumpFee = hasDemo ? 250 : 150
+  // Labor hours (rough but realistic)
+  let laborHrs = 0
+  laborHrs += hasDemo ? 16 : 10                         // demo + haul prep
+  laborHrs += hasValveRelocate ? 10 : 0                 // open wall + relocate + test
+  laborHrs += hasWaterproof ? 10 : 0                    // prep + membrane/paint-on + details
+  laborHrs += hasWallTile ? Math.max(28, wallTileSqft * 0.30) : 0 // tile walls incl layout/cuts
+  laborHrs += hasVanity ? 6 : 0                         // set vanity + hook-ups
+  laborHrs += 10                                        // protection, cleanup, coordination, returns
 
-  const tileLaborHrs = hasTile ? Math.max(12, sqft * 0.20) : 0
-  const tileMaterials = hasTile ? Math.max(450, sqft * 7) : 0
-
-  const vanityLaborHrs = hasVanity ? 6 : 0
-  const vanityMaterials = hasVanity ? 150 : 0
-
-  const paintLaborHrs = hasPaint ? 6 : 0
-  const paintMaterials = hasPaint ? 120 : 0
-
-  // Coordination/finish allowance for remodel
-  let laborHrs =
-    demoLaborHrs +
-    tileLaborHrs +
-    vanityLaborHrs +
-    paintLaborHrs +
-    8
+  // Hard floor so remodels can't come out “one day”
+  laborHrs = Math.max(70, laborHrs)
 
   let labor = Math.round(laborHrs * laborRate)
   labor = Math.round(labor * args.stateMultiplier)
 
-  const materials = Math.round(tileMaterials + vanityMaterials + paintMaterials)
+  // Materials allowances (mid-market; not luxury finishes)
+  let materials = 0
+  materials += hasDemo ? 150 : 75                       // protection/consumables
+  materials += hasValveRelocate ? 300 : 0               // fittings/valve misc (not designer trim kits)
+  materials += hasWaterproof ? 350 : 0                  // membrane/roll-on + accessories
+  materials += hasWallTile ? Math.max(900, wallTileSqft * 10) : 0 // tile + setting materials allowance
+  materials += hasVanity ? 250 : 0                      // supplies, traps, stops, misc
+  materials = Math.round(materials)
 
-  const mobilization = 350
-  const supervision = Math.round((labor + materials) * 0.08)
-  const subs = mobilization + supervision + demoDumpFee
+  // Subs / overhead (dump + supervision + mobilization)
+  const mobilization = 750
+  const dumpFee = hasDemo ? 450 : 0
+  const supervision = Math.round((labor + materials) * 0.10)
+  const subs = mobilization + dumpFee + supervision
 
   const base = labor + materials + subs
   const total = Math.round(base * (1 + markup / 100))
@@ -865,6 +1436,34 @@ function pricePlumbingFixtureSwapsAnchor(args: {
   const total = Math.round(base * (1 + markup / 100))
 
   return { labor, materials, subs, markup, total }
+}
+
+function isPlumbingRemodelConflict(args: {
+  scopeText: string
+  complexity: ComplexityProfile | null
+}): boolean {
+  const s = (args.scopeText || "").toLowerCase()
+  const cp = args.complexity
+
+  const isBath =
+    /\b(bath|bathroom|shower|tub)\b/.test(s)
+
+  const remodelSignals =
+    /\b(remodel|renovation|gut|rebuild|demo|demolition|tear\s*out)\b/.test(s)
+
+  // “Not plumbing-only” signals (tile/wet-area/finish coordination)
+  const nonPlumbingSignals =
+    /\b(tile|wall\s*tile|tub\s*surround|shower\s+walls?|backsplash|waterproof|membrane|red\s*guard|cement\s*board|durock|hardie(backer)?|thinset|grout)\b/.test(s)
+
+  // Rough-in / relocation is often part of remodel and should not be priced as “only plumbing”
+  const relocateSignals =
+    /\b(rough[-\s]*in|relocat(e|ing|ion)|move\s+(drain|supply|valve|line))\b/.test(s)
+
+  // If complexity already classified as remodel/multiTrade, trust it
+  const cpSaysRemodel = cp?.class === "remodel" || cp?.multiTrade === true
+
+  // Conflict means: bathroom remodel patterns present + not plumbing-only
+  return isBath && (remodelSignals || cpSaysRemodel) && (nonPlumbingSignals || relocateSignals)
 }
 
 const PRICEGUARD_ANCHORS: PricingAnchor[] = [
@@ -1399,6 +1998,11 @@ const paintScopeForJob: PaintScope | null =
 
 const intentHint = detectIntent(scopeChange)
 
+const complexityProfile = buildComplexityProfile({
+  scopeText: scopeChange,
+  trade,
+})
+
 // Start with raw scope
 let effectiveScopeChange = scopeChange
 
@@ -1452,10 +2056,25 @@ const plumbingDet =
       })
     : null
 
-    const plumbingDetPricing: Pricing | null =
-  plumbingDet?.okForDeterministic
-    ? clampPricing(coercePricing(plumbingDet.pricing))
-    : null
+const plumbingScopeConflict =
+  trade === "plumbing" &&
+  isPlumbingRemodelConflict({
+    scopeText: scopeChange,
+    complexity: complexityProfile,
+  })
+
+const plumbingDetPricing: Pricing | null =
+  plumbingScopeConflict
+    ? null
+    : plumbingDet?.okForDeterministic
+      ? clampPricing(coercePricing(plumbingDet.pricing))
+      : null
+
+console.log("PG PLUMBING CONFLICT", {
+  plumbingScopeConflict,
+  jobType: plumbingDet?.jobType ?? null,
+  okForDeterministic: plumbingDet?.okForDeterministic ?? null,
+})
 
     // Drywall deterministic engine (PriceGuard™)
 const drywallDet =
@@ -1487,8 +2106,23 @@ const drywallDetPricing: Pricing | null =
 const looksLikePainting = trade === "painting"
 
 // PriceGuard™ v2 — Orchestration table (anchors only for non-deterministic trades)
+const allowAnchors =
+  // normal rule: anchors for non-deterministic trades
+  !(trade === "electrical" || trade === "plumbing" || trade === "flooring" || trade === "drywall")
+  // exception: if deterministic pricing is NOT available, allow anchors
+  || (trade === "plumbing" && !plumbingDetPricing)
+  || (trade === "electrical" && !electricalDetPricing)
+  || (trade === "flooring" && !flooringDetPricing)
+  || (trade === "drywall" && !drywallDetPricing)
+
+const allowBathAnchorInPlumbing =
+  trade === "plumbing" && /\b(bath|bathroom|shower|tub)\b/i.test(scopeChange)
+
 const anchorHit =
-  trade === "electrical" || trade === "plumbing" || trade === "flooring" || trade === "drywall"
+  (trade === "electrical" ||
+   trade === "flooring" ||
+   trade === "drywall" ||
+   (trade === "plumbing" && !allowBathAnchorInPlumbing))
     ? null
     : runPriceGuardAnchors({
         scope: scopeChange,
@@ -1655,6 +2289,22 @@ INPUTS:
 - Job State: ${jobState}
 - Paint Scope: ${looksLikePainting ? effectivePaintScope : "N/A"}
 
+COMPLEXITY PROFILE (SYSTEM-LOCKED — FOLLOW STRICTLY):
+- class: ${complexityProfile.class}
+- requireDaysBasis: ${complexityProfile.requireDaysBasis ? "YES" : "NO"}
+- permitLikely: ${complexityProfile.permitLikely ? "YES" : "NO"}
+- notes:
+${complexityProfile.notes.map(n => `- ${n}`).join("\n")}
+- minimums:
+  - min crewDays: ${complexityProfile.minCrewDays}
+  - min mobilization: ${complexityProfile.minMobilization}
+  - min subs: ${complexityProfile.minSubs}
+
+RULE:
+If requireDaysBasis is YES, your estimateBasis MUST include:
+- units includes "days"
+- crewDays is set and realistic for the class
+
 SCOPE OF WORK:
 ${effectiveScopeChange}
 
@@ -1801,6 +2451,11 @@ If scope includes an explicit count N:
 - Materials must scale with N when materials are per-item (paint, devices, fixtures).
 - If you output identical totals for different explicit counts, you MUST revise your pricing until totals scale.
 
+ESTIMATE BASIS RULE (CRITICAL):
+- You MUST include "estimateBasis" and it MUST match the pricing math (labor + materials + subs, then markup).
+- "units" must be 1–3 items from the allowed list.
+- If you detect explicit counts (doors/rooms/sqft/devices/fixtures), quantities must include them.
+
 OUTPUT FORMAT (STRICT — REQUIRED):
 Return ONLY valid JSON matching EXACTLY this schema.
 All fields are REQUIRED. Do not omit any field.
@@ -1815,6 +2470,24 @@ All fields are REQUIRED. Do not omit any field.
     "subs": <number>,
     "markup": <number>,
     "total": <number>
+  },
+  "estimateBasis": {
+    "units": ["sqft | linear_ft | rooms | doors | fixtures | devices | days | lump_sum"],
+    "quantities": {
+      "sqft": <number>,
+      "linear_ft": <number>,
+      "rooms": <number>,
+      "doors": <number>,
+      "fixtures": <number>,
+      "devices": <number>,
+      "days": <number>,
+      "lump_sum": <number>
+    },
+    "laborRate": <number>,
+    "hoursPerUnit": <number>,
+    "crewDays": <number>,
+    "mobilization": <number>,
+    "assumptions": ["<string>"]
   }
 }
 
@@ -1890,10 +2563,75 @@ const normalized: any = {
   trade: aiParsed.trade,
   description: aiParsed.description,
   pricing: aiParsed.pricing,
+  estimateBasis: aiParsed.estimateBasis ?? null,
 }
 
 // 🔒 Coerce AI pricing to numbers (prevents string math bugs)
 normalized.pricing = clampPricing(coercePricing(normalized.pricing))
+
+// --- AI unit + math validation (one-shot repair if needed) ---
+const parsedSqft = parseSqft(scopeChange) // uses your existing helper
+const aiBasis = (normalized.estimateBasis ?? null) as EstimateBasis | null
+
+const v = validateAiMath({
+  pricing: normalized.pricing,
+  basis: aiBasis,
+  parsedCounts: { rooms, doors, sqft: parsedSqft },
+  complexity: complexityProfile,
+  scopeText: scopeChange, // ✅
+})
+
+if (!v.ok) {
+  const repairPrompt = `${prompt}
+
+REPAIR REQUIRED:
+The prior JSON failed validation for these reasons:
+- ${v.reasons.join("\n- ")}
+
+Return corrected JSON using the SAME schema, and make estimateBasis match the pricing math exactly. Do not add extra fields.`
+
+  // ✅ #2: Do NOT let repair failures crash the route
+  try {
+    const repair = await openai.chat.completions.create({
+      model: PRIMARY_MODEL,
+      temperature: 0.15,
+      response_format: { type: "json_object" },
+      messages: [{ role: "user", content: repairPrompt }],
+    })
+
+    const repairContent = repair.choices[0]?.message?.content
+    if (repairContent) {
+      try {
+        const repaired = JSON.parse(repairContent)
+
+        normalized.documentType = repaired.documentType ?? normalized.documentType
+        normalized.trade = repaired.trade ?? normalized.trade
+        normalized.description = repaired.description ?? normalized.description
+        normalized.pricing = clampPricing(coercePricing(repaired.pricing))
+        normalized.estimateBasis = repaired.estimateBasis ?? normalized.estimateBasis
+      } catch {
+        console.warn("AI repair returned invalid JSON; continuing with original output.")
+      }
+    }
+  } catch (e) {
+    console.warn("AI repair call failed; continuing with original output.", e)
+  }
+
+  // ✅ #3: Re-validate once after repair (or attempted repair)
+  const v2 = validateAiMath({
+  pricing: normalized.pricing,
+  basis: (normalized.estimateBasis ?? null) as EstimateBasis | null,
+  parsedCounts: { rooms, doors, sqft: parsedSqft },
+  complexity: complexityProfile,
+  scopeText: scopeChange,
+})
+
+  if (!v2.ok) {
+    console.warn("AI output still failing validation after repair:", v2.reasons)
+    // Optional (safe default): do nothing — your deterministic/merge safety floor still protects you later.
+    // If you ever want to force non-AI behavior when it fails twice, this is the spot to do it.
+  }
+}
 
 // ✅ Normalize documentType BEFORE any early returns (deterministic path included)
 const allowedTypes = [
@@ -1912,6 +2650,17 @@ if (typeof normalized.description !== "string" || normalized.description.trim().
     `This ${normalized.documentType} covers the described scope of work as provided, including labor, materials, protection, and cleanup associated with ${tradeLabel} scope.`
 }
 
+// Clean up duplicated document type tokens in the first sentence
+if (typeof normalized.description === "string") {
+  normalized.description = normalized.description
+    .replace(
+      /^This\s+Change Order\s*\/\s*Estimate\s*\/\s*Estimate\b/i,
+      "This Change Order / Estimate"
+    )
+    .replace(/^This\s+Estimate\s*\/\s*Estimate\b/i, "This Estimate")
+    .trim()
+}
+
 // Start from AI as default
 let pricingSource: "ai" | "deterministic" | "merged" = "ai"
 let priceGuardVerified = false
@@ -1925,6 +2674,14 @@ if (anchorHit?.id === "kitchen_remodel_v1" && anchorPricing) {
   detSource = `anchor:${anchorHit.id}`
   priceGuardVerified = true
 }
+
+if (anchorHit?.id === "bathroom_remodel_v1" && anchorPricing) {
+  pricingFinal = clampPricing(coercePricing(anchorPricing))
+  pricingSource = "deterministic"
+  detSource = `anchor:${anchorHit.id}`
+  priceGuardVerified = true
+}
+
 // ✅ Rooms + doors mixed painting deterministic-owned
 if (
   pricingSource !== "deterministic" &&
@@ -1997,12 +2754,13 @@ const deterministicOwned =
       sourceId: "electrical_engine_v1",
     })) ||
   (trade === "plumbing" &&
-    applyDeterministicOwnership({
-      pricing: plumbingDetPricing,
-      okForVerified: !!plumbingDet?.okForVerified,
-      sourceVerifiedId: "plumbing_engine_v1_verified",
-      sourceId: "plumbing_engine_v1",
-    })) ||
+  !plumbingScopeConflict &&
+  applyDeterministicOwnership({
+    pricing: plumbingDetPricing,
+    okForVerified: !!plumbingDet?.okForVerified,
+    sourceVerifiedId: "plumbing_engine_v1_verified",
+    sourceId: "plumbing_engine_v1",
+  })) ||
   (trade === "drywall" &&
     applyDeterministicOwnership({
       pricing: drywallDetPricing,
@@ -2016,6 +2774,44 @@ if (deterministicOwned) {
   const priceGuardProtected = true
 
   normalized.trade = trade
+
+  // --- Description sync when deterministic owns pricing (prevents wrong narrative) ---
+if (trade === "electrical" && electricalDet?.jobType) {
+  if (electricalDet.jobType === "device_work") {
+    normalized.description = normalized.description.replace(
+      /^This (Change Order|Estimate|Change Order \/ Estimate)\b/,
+      `This ${normalized.documentType}`
+    )
+    // Add a short scope-lock sentence if missing
+    if (!/outlet|switch|recessed|fixture/i.test(normalized.description)) {
+      normalized.description += " Work covers device-level electrical installation/replacement as described, including protection, testing, and cleanup."
+    }
+  }
+  if (electricalDet.jobType === "panel_replacement" && !/panel/i.test(normalized.description)) {
+    normalized.description += " Scope includes electrical panel replacement activities as described, including labeling, changeover coordination, testing, and cleanup."
+  }
+}
+
+if (trade === "plumbing" && plumbingDet?.jobType) {
+  if (plumbingDet.jobType === "fixture_swaps" && !/toilet|faucet|sink|vanity|valve/i.test(normalized.description)) {
+    normalized.description += " Scope covers fixture-level plumbing work as described, including isolation, removal/install, test, and cleanup."
+  }
+}
+
+if (trade === "drywall" && drywallDet?.jobType) {
+  if (drywallDet.jobType === "patch_repair" && !/patch|repair/i.test(normalized.description)) {
+    normalized.description += " Work includes drywall patch/repair steps as described, including prep, finish work, and site cleanup."
+  }
+}
+
+normalized.description = appendExecutionPlanSentence({
+  description: normalized.description,
+  documentType: normalized.documentType,
+  trade,
+  cp: complexityProfile,
+  basis: (normalized.estimateBasis ?? null) as EstimateBasis | null,
+  scopeText: scopeChange,
+})
 
   const pg = buildPriceGuardReport({
     pricingSource,
@@ -2235,6 +3031,15 @@ const pg = buildPriceGuardReport({
 })
 
 normalized.trade = trade
+
+normalized.description = appendExecutionPlanSentence({
+  description: normalized.description,
+  documentType: normalized.documentType,
+  trade,
+  cp: complexityProfile,
+  basis: (normalized.estimateBasis ?? null) as EstimateBasis | null,
+  scopeText: scopeChange,
+})
 
 await incrementUsageIfFree()
 

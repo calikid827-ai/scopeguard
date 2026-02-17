@@ -102,10 +102,20 @@ function classifyBathRoughIn(scopeText: string) {
       s
     )
 
-  const demoOrTileContext =
-    /\b(demo|demolition|tear\s*out|gut|tile|wall\s*tile|shower\s*walls?|tub\s*surround|waterproof|backer\s*board|cement\s*board|durock|hardie)\b/.test(
-      s
-    )
+    // Context signals (work happening inside a bath remodel environment)
+  const remodelContext =
+    /\b(demo|demolition|tear\s*out|gut|remodel|renovation|rebuild)\b/.test(s)
+
+  const wetAreaFinishSignals =
+    /\b(waterproof|membrane|red\s*guard|shower\s*pan|pan|curb|cement\s*board|backer\s*board|durock|hardie(backer)?|thinset|grout|tile|wall\s*tile|shower\s*walls?|tub\s*surround)\b/.test(s)
+
+  // Finish/GC package signals that mean this is NOT plumber-only pricing
+  const nonPlumbingPackageSignals =
+    /\b(install\s+vanity|new\s+vanity|install\s+tile|tile\s+walls?|install\s+shower|install\s+tub)\b/.test(s)
+
+  // If they explicitly say "plumbing rough-in", we can still treat it as rough-in pricing
+  const explicitPlumbingRoughIn =
+    /\b(plumbing\s*rough[-\s]*in|rough\s*plumb(ing)?|rough[-\s]*in)\b/.test(s)
 
   // IMPORTANT: prevent rough-in from stealing fixture swap jobs
   const fixtureBreakdown = parsePlumbingFixtureBreakdown(scopeText)
@@ -113,22 +123,36 @@ function classifyBathRoughIn(scopeText: string) {
     fixtureBreakdown?.total && fixtureBreakdown.total > 0 &&
     /\b(replace|replacing|swap|swapping|remove\s+and\s+replace)\b/.test(s)
 
+    // If the scope includes wet-area finishing (waterproof/tile/etc) AND it does NOT explicitly say "plumbing rough-in",
+  // we should NOT let plumbing deterministic claim ownership (route anchor will handle full remodel pricing).
+  const finishBlocksPlumbingOnly =
+    (wetAreaFinishSignals || nonPlumbingPackageSignals) && !explicitPlumbingRoughIn
+
   const shouldActivate =
     !looksLikeFixtureSwap &&
     mentionsBath &&
-    (roughIn || valveRelocation || newShowerOrTub || drainWork || supplyWork) &&
-    demoOrTileContext
+    // Require actual plumbing rough-in/relocation work (not just "new shower/tub")
+    (roughIn || valveRelocation || drainWork || supplyWork) &&
+    // Must be in remodel context OR explicitly a rough-in job
+    (remodelContext || explicitPlumbingRoughIn) &&
+    // Block plumber-only pricing when the text clearly includes other trades
+    !finishBlocksPlumbingOnly
 
   return {
     shouldActivate,
-    signals: {
+        signals: {
       mentionsBath,
       roughIn,
       valveRelocation,
       newShowerOrTub,
       drainWork,
       supplyWork,
-      demoOrTileContext,
+
+      remodelContext,
+      wetAreaFinishSignals,
+      nonPlumbingPackageSignals,
+      explicitPlumbingRoughIn,
+      finishBlocksPlumbingOnly,
     },
   }
 }
@@ -228,6 +252,23 @@ export function computePlumbingDeterministic(args: {
   pricing: Pricing | null
 } {
   const t = (args.scopeText || "").toLowerCase()
+
+    // HARD BLOCK: if scope reads like a full bath remodel package (tile/waterproof/vanity/etc),
+  // do not allow plumbing deterministic to own pricing. Let anchors / general renovation handle it.
+  const bathRemodelPackageSignals =
+    /\b(bath|bathroom|shower|tub)\b/.test(t) &&
+    /\b(remodel|renovation|gut|rebuild|demo|demolition|tear\s*out|waterproof|membrane|tile|wall\s*tile|shower\s+walls?|tub\s*surround|install\s+vanity|new\s+vanity)\b/.test(t)
+
+  if (bathRemodelPackageSignals) {
+    return {
+      okForDeterministic: false,
+      okForVerified: false,
+      jobType: "unknown",
+      signals: { bathRemodelPackageSignals: true },
+      notes: ["Skipped: scope appears to be a full bathroom remodel package; plumbing-only deterministic pricing disabled."],
+      pricing: null,
+    }
+  }
 
   // 1) Bath rough-in gets first chance (because fixture engine blocks remodel/rough-in words)
   const roughCls = classifyBathRoughIn(args.scopeText)

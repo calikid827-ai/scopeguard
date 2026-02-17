@@ -1,7 +1,6 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
-import React from "react"
 
 type PaintScope = "walls" | "walls_ceilings" | "full"
 type EffectivePaintScope = PaintScope | "doors_only"
@@ -15,6 +14,15 @@ export default function Home() {
 const entitlementReqId = useRef(0)
 
 const lastSavedEstimateIdRef = useRef<string | null>(null)
+
+const invoicesSectionRef = useRef<HTMLDivElement | null>(null)
+
+function scrollToInvoices() {
+  // small delay so UI can render filtered invoices after setting activeJobId
+  setTimeout(() => {
+    invoicesSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+  }, 50)
+}
   
   const PAINT_SCOPE_OPTIONS = [
   { label: "Walls only", value: "walls" },
@@ -73,6 +81,8 @@ const lastSavedEstimateIdRef = useRef<string | null>(null)
   }
 }
 
+type InvoiceStatus = "draft" | "sent" | "paid" | "overdue"
+
 type Invoice = {
   id: string
   createdAt: number
@@ -88,7 +98,12 @@ type Invoice = {
   subtotal: number
   total: number
   notes: string
-    deposit?: {
+
+  // ✅ NEW
+  status: InvoiceStatus
+  paidAt?: number
+
+  deposit?: {
     enabled: boolean
     type: "percent" | "fixed"
     value: number
@@ -320,6 +335,128 @@ useEffect(() => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
 }, [email])
 
+// -------------------------
+// Jobs Dashboard helpers
+// -------------------------
+function latestEstimateForJob(jobId: string) {
+  const list = history
+    .filter((h) => h.jobId === jobId)
+    .sort((a, b) => b.createdAt - a.createdAt)
+  return list[0] || null
+}
+
+function money(n: number) {
+  return `$${Number(n || 0).toLocaleString()}`
+}
+
+function invoiceSummaryForJob(jobId: string) {
+  const list = invoices.filter((x) => x.jobId === jobId)
+  let paidCount = 0
+  let overdueCount = 0
+  let openCount = 0
+  let outstanding = 0
+  let draftCount = 0
+
+for (const inv of list) {
+  const st = computeLiveInvoiceStatus(inv)
+
+  if (st === "paid") {
+    paidCount += 1
+    continue
+  }
+
+  if (st === "draft") {
+    draftCount += 1
+    continue
+  }
+
+  if (st === "overdue") overdueCount += 1
+  else openCount += 1
+
+  outstanding += Number(inv.total || 0)
+}
+
+return {
+  total: list.length,
+  draftCount,
+  paidCount,
+  overdueCount,
+  openCount,
+  outstanding: Math.round(outstanding),
+ }
+}
+
+  
+
+function latestInvoiceForJob(jobId: string) {
+  const list = invoices
+    .filter((x) => x.jobId === jobId)
+    .sort((a, b) => b.createdAt - a.createdAt)
+  return list[0] || null
+}
+
+function selectJobAndJumpToInvoices(jobId: string) {
+  setActiveJobId(jobId)
+  setStatus("Job selected.")
+  scrollToInvoices()
+}
+
+function createInvoiceFromLatestEstimate(jobId: string) {
+  const est = latestEstimateForJob(jobId)
+  if (!est) {
+    setStatus("No estimate found for this job yet.")
+    return
+  }
+  createInvoiceFromEstimate(est)
+  selectJobAndJumpToInvoices(jobId)
+}
+
+function createBalanceInvoiceFromLatestEstimate(jobId: string) {
+  const est = latestEstimateForJob(jobId)
+  if (!est) {
+    setStatus("No estimate found for this job yet.")
+    return
+  }
+  createBalanceInvoiceFromEstimate(est)
+  selectJobAndJumpToInvoices(jobId)
+}
+
+function isPastDue(dueISO: string) {
+  // dueISO is "yyyy-mm-dd"
+  const due = new Date(dueISO + "T23:59:59")
+  return Date.now() > due.getTime()
+}
+
+function normalizeInvoiceStatus(inv: any): InvoiceStatus {
+  const s = String(inv?.status || "").toLowerCase()
+  const allowed: InvoiceStatus[] = ["draft", "sent", "paid", "overdue"]
+  if (allowed.includes(s as InvoiceStatus)) return s as InvoiceStatus
+
+  // migration default:
+  // if already paidAt exists -> paid, else if past due -> overdue, else sent
+  if (typeof inv?.paidAt === "number") return "paid"
+  if (typeof inv?.dueDate === "string" && isPastDue(inv.dueDate)) return "overdue"
+  return "draft"
+}
+
+function computeLiveInvoiceStatus(inv: Invoice): InvoiceStatus {
+  if (typeof inv.paidAt === "number") return "paid"
+  if (inv.status === "draft") return "draft"
+  if (isPastDue(inv.dueDate)) return "overdue"
+  return "sent"
+}
+
+function computeDepositFromEstimateTotal(estTotal: number, dep?: { enabled: boolean; type: "percent" | "fixed"; value: number }) {
+  if (!dep?.enabled || estTotal <= 0) return { depositDue: 0, remaining: estTotal }
+  if (dep.type === "percent") {
+    const pct = Math.max(0, Math.min(100, Number(dep.value || 0)))
+    const depositDue = Math.round(estTotal * (pct / 100))
+    return { depositDue, remaining: Math.max(0, estTotal - depositDue) }
+  }
+  const fixed = Math.max(0, Number(dep.value || 0))
+  const depositDue = Math.min(estTotal, Math.round(fixed))
+  return { depositDue, remaining: Math.max(0, estTotal - depositDue) }
+}
 
   // -------------------------
   // Company profile (persisted)
@@ -650,7 +787,30 @@ useEffect(() => {
 
   try {
     const parsed = JSON.parse(saved)
-    if (Array.isArray(parsed)) setInvoices(parsed)
+    if (!Array.isArray(parsed)) return
+
+    const cleaned: Invoice[] = parsed.map((x: any) => ({
+      id: String(x?.id ?? crypto.randomUUID()),
+      createdAt: Number(x?.createdAt ?? Date.now()),
+      jobId: x?.jobId ? String(x.jobId) : undefined,
+      fromEstimateId: String(x?.fromEstimateId ?? ""),
+      invoiceNo: String(x?.invoiceNo ?? "INV-UNKNOWN"),
+      issueDate: String(x?.issueDate ?? ""),
+      dueDate: String(x?.dueDate ?? ""),
+      billToName: String(x?.billToName ?? ""),
+      jobName: String(x?.jobName ?? ""),
+      jobAddress: String(x?.jobAddress ?? ""),
+      lineItems: Array.isArray(x?.lineItems) ? x.lineItems : [],
+      subtotal: Number(x?.subtotal ?? 0),
+      total: Number(x?.total ?? 0),
+      notes: String(x?.notes ?? ""),
+      deposit: x?.deposit ?? undefined,
+      status: normalizeInvoiceStatus(x),
+      paidAt: typeof x?.paidAt === "number" ? x.paidAt : undefined,
+    }))
+
+    setInvoices(cleaned)
+    localStorage.setItem(INVOICE_KEY, JSON.stringify(cleaned))
   } catch {
     // ignore bad data
   }
@@ -955,6 +1115,14 @@ function updateHistoryItem(id: string, patch: Partial<EstimateHistoryItem>) {
   setHistory((prev) => {
     const next = prev.map((h) => (h.id === id ? { ...h, ...patch } : h))
     localStorage.setItem(HISTORY_KEY, JSON.stringify(next))
+    return next
+  })
+}
+
+function updateInvoice(id: string, patch: Partial<Invoice>) {
+  setInvoices((prev) => {
+    const next = prev.map((inv) => (inv.id === id ? { ...inv, ...patch } : inv))
+    localStorage.setItem(INVOICE_KEY, JSON.stringify(next))
     return next
   })
 }
@@ -1764,6 +1932,9 @@ function createInvoiceFromEstimate(est: EstimateHistoryItem) {
         }`
       : `Payment terms: ${companyProfile.paymentTerms?.trim() || "Due upon approval."}`,
 
+      status: "draft",
+      paidAt: undefined,
+
     deposit: depEnabled
       ? {
           enabled: true,
@@ -1783,8 +1954,8 @@ function createInvoiceFromEstimate(est: EstimateHistoryItem) {
 // ✅ Create Balance Invoice (Remaining Balance after Deposit)
 function createBalanceInvoiceFromEstimate(est: EstimateHistoryItem) {
   const issue = new Date()
-  const due = new Date()
-  due.setDate(due.getDate() + 7)
+  const terms = companyProfile.paymentTerms?.trim() || "Net 7"
+  const dueISO = computeDueDateISO(issue, terms)
 
   const client = est?.jobDetails?.clientName || jobDetails.clientName || "Client"
   const jobNm = est?.jobDetails?.jobName || jobDetails.jobName || "Job"
@@ -1844,7 +2015,7 @@ function createBalanceInvoiceFromEstimate(est: EstimateHistoryItem) {
     fromEstimateId: est.id,
     invoiceNo: makeInvoiceNo(),
     issueDate: toISODate(issue),
-    dueDate: toISODate(due),
+    dueDate: dueISO,
     billToName: client,
     jobName: jobNm,
     jobAddress: jobAddr,
@@ -1855,6 +2026,9 @@ function createBalanceInvoiceFromEstimate(est: EstimateHistoryItem) {
     notes: `Balance invoice. Estimate total (incl. tax if applied): $${estimateTotal.toLocaleString()}. Deposit paid/required: $${depDue.toLocaleString()}. Remaining balance due: $${balanceDue.toLocaleString()}. Payment terms: ${
       companyProfile.paymentTerms?.trim() || "Due upon approval."
     }`,
+
+    status: "draft",
+    paidAt: undefined,
 
     // keep deposit context so PDF can optionally show it
     deposit: {
@@ -2118,133 +2292,184 @@ const sub =
   * Required
 </p>
 
-      <h3>Company Profile</h3>
-      {["name", "address", "phone", "email"].map((f) => (
-        <input
-          key={f}
-          placeholder={f}
-          value={(companyProfile as any)[f]}
-          onChange={(e) =>
-            setCompanyProfile({
-              ...companyProfile,
-              [f]: e.target.value,
-            })
-          }
-          style={{ width: "100%", padding: 8, marginBottom: 8 }}
-        />
-      ))}
-
-      <label style={{ fontSize: 13, fontWeight: 600 }}>
-  Company Logo (optional)
-</label>
-
-<input
-  type="file"
-  accept="image/*"
-  onChange={(e) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-
-    const reader = new FileReader()
-    reader.onloadend = () => {
-      setCompanyProfile((prev) => ({
-        ...prev,
-        logo: reader.result as string,
-      }))
-    }
-    reader.readAsDataURL(file)
+{/* -------------------------
+    ⚙️ Business Settings (Collapsed)
+------------------------- */}
+<details
+  style={{
+    marginTop: 18,
+    marginBottom: 8,
+    padding: 12,
+    border: "1px solid #e5e7eb",
+    borderRadius: 12,
+    background: "#fff",
   }}
-  style={{ width: "100%", padding: 8, marginBottom: 8 }}
-/>
-
-{companyProfile.logo && (
-  <img
-    src={companyProfile.logo}
-    alt="Company logo preview"
+>
+  <summary
     style={{
-      maxHeight: 60,
-      marginBottom: 12,
-      objectFit: "contain",
+      cursor: "pointer",
+      fontWeight: 800,
+      fontSize: 14,
     }}
-  />
-)}
+  >
+    ⚙️ Business Settings
+  </summary>
 
-<input
-  placeholder="Contractor License # (optional)"
-  value={(companyProfile as any).license || ""}
-  onChange={(e) =>
-    setCompanyProfile({
-      ...companyProfile,
-      license: e.target.value,
-    })
-  }
-  style={{ width: "100%", padding: 8, marginBottom: 8 }}
-/>
+  <div style={{ marginTop: 10 }}>
+    <h3>Company Profile</h3>
 
-<textarea
-  placeholder="Default payment terms (optional) — shown on PDFs & invoices"
-  value={companyProfile.paymentTerms}
-  onChange={(e) =>
-    setCompanyProfile({
-      ...companyProfile,
-      paymentTerms: e.target.value,
-    })
-  }
-  style={{ width: "100%", padding: 8, marginBottom: 8, height: 70 }}
-/>
+    {["name", "address", "phone", "email"].map((f) => (
+      <input
+        key={f}
+        placeholder={f}
+        value={(companyProfile as any)[f]}
+        onChange={(e) =>
+          setCompanyProfile({
+            ...companyProfile,
+            [f]: e.target.value,
+          })
+        }
+        style={{ width: "100%", padding: 8, marginBottom: 8 }}
+      />
+    ))}
 
-      <h3 style={{ marginTop: 18 }}>Job Details</h3>
+    <label style={{ fontSize: 13, fontWeight: 600 }}>
+      Company Logo (optional)
+    </label>
 
-<input
-  placeholder="Client name"
-  value={jobDetails.clientName}
-  onChange={(e) =>
-    setJobDetails({ ...jobDetails, clientName: e.target.value })
-  }
-  style={{ width: "100%", padding: 8, marginBottom: 8 }}
-/>
+    <input
+      type="file"
+      accept="image/*"
+      onChange={(e) => {
+        const file = e.target.files?.[0]
+        if (!file) return
 
-<input
-  placeholder="Job / Project name"
-  value={jobDetails.jobName}
-  onChange={(e) =>
-    setJobDetails({ ...jobDetails, jobName: e.target.value })
-  }
-  style={{ width: "100%", padding: 8, marginBottom: 8 }}
-/>
+        const reader = new FileReader()
+        reader.onloadend = () => {
+          setCompanyProfile((prev) => ({
+            ...prev,
+            logo: reader.result as string,
+          }))
+        }
+        reader.readAsDataURL(file)
+      }}
+      style={{ width: "100%", padding: 8, marginBottom: 8 }}
+    />
 
-<input
-  placeholder="Job address (optional)"
-  value={jobDetails.jobAddress}
-  onChange={(e) =>
-    setJobDetails({ ...jobDetails, jobAddress: e.target.value })
-  }
-  style={{ width: "100%", padding: 8, marginBottom: 8 }}
-/>
+    {companyProfile.logo && (
+      <img
+        src={companyProfile.logo}
+        alt="Company logo preview"
+        style={{
+          maxHeight: 60,
+          marginBottom: 12,
+          objectFit: "contain",
+        }}
+      />
+    )}
 
-<div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-  <input
-    placeholder="Change Order # (optional)"
-    value={jobDetails.changeOrderNo}
-    onChange={(e) =>
-      setJobDetails({ ...jobDetails, changeOrderNo: e.target.value })
-    }
-    style={{ width: "100%", padding: 8 }}
-  />
-  <input
-    type="date"
-    value={jobDetails.date}
-    onChange={(e) =>
-      setJobDetails({ ...jobDetails, date: e.target.value })
-    }
-    style={{ width: "100%", padding: 8 }}
-  />
-</div>
+    <input
+      placeholder="Contractor License # (optional)"
+      value={(companyProfile as any).license || ""}
+      onChange={(e) =>
+        setCompanyProfile({
+          ...companyProfile,
+          license: e.target.value,
+        })
+      }
+      style={{ width: "100%", padding: 8, marginBottom: 8 }}
+    />
 
-<p style={{ fontSize: 12, color: "#666", marginTop: 6 }}>
-  Tip: leave the date blank to auto-fill today on the PDF.
-</p>
+    <textarea
+      placeholder="Default payment terms (optional) — shown on PDFs & invoices"
+      value={companyProfile.paymentTerms}
+      onChange={(e) =>
+        setCompanyProfile({
+          ...companyProfile,
+          paymentTerms: e.target.value,
+        })
+      }
+      style={{ width: "100%", padding: 8, marginBottom: 8, height: 70 }}
+    />
+  </div>
+</details>
 
+{/* -------------------------
+    🧾 Job Details (Collapsed)
+------------------------- */}
+<details
+  style={{
+    marginTop: 18,
+    marginBottom: 8,
+    padding: 12,
+    border: "1px solid #e5e7eb",
+    borderRadius: 12,
+    background: "#fff",
+  }}
+>
+  <summary
+    style={{
+      cursor: "pointer",
+      fontWeight: 800,
+      fontSize: 14,
+    }}
+  >
+    🧾 Job Details
+  </summary>
+
+  <div style={{ marginTop: 10 }}>
+    <input
+      placeholder="Client name"
+      value={jobDetails.clientName}
+      onChange={(e) =>
+        setJobDetails({ ...jobDetails, clientName: e.target.value })
+      }
+      style={{ width: "100%", padding: 8, marginBottom: 8 }}
+    />
+
+    <input
+      placeholder="Job / Project name"
+      value={jobDetails.jobName}
+      onChange={(e) =>
+        setJobDetails({ ...jobDetails, jobName: e.target.value })
+      }
+      style={{ width: "100%", padding: 8, marginBottom: 8 }}
+    />
+
+    <input
+      placeholder="Job address (optional)"
+      value={jobDetails.jobAddress}
+      onChange={(e) =>
+        setJobDetails({ ...jobDetails, jobAddress: e.target.value })
+      }
+      style={{ width: "100%", padding: 8, marginBottom: 8 }}
+    />
+
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+      <input
+        placeholder="Change Order # (optional)"
+        value={jobDetails.changeOrderNo}
+        onChange={(e) =>
+          setJobDetails({ ...jobDetails, changeOrderNo: e.target.value })
+        }
+        style={{ width: "100%", padding: 8 }}
+      />
+      <input
+        type="date"
+        value={jobDetails.date}
+        onChange={(e) =>
+          setJobDetails({ ...jobDetails, date: e.target.value })
+        }
+        style={{ width: "100%", padding: 8 }}
+      />
+    </div>
+
+    <p style={{ fontSize: 12, color: "#666", marginTop: 6 }}>
+      Tip: leave the date blank to auto-fill today on the PDF.
+    </p>
+  </div>
+</details>
+     
       <p style={{ marginTop: 12, fontWeight: 600 }}>Trade Type</p>
 <select
   value={trade}
@@ -2373,6 +2598,7 @@ const sub =
 ------------------------- */}
 {filteredInvoices.length > 0 && (
   <div
+    ref={invoicesSectionRef}
     style={{
       marginTop: 18,
       padding: 12,
@@ -2385,7 +2611,11 @@ const sub =
       <h3 style={{ margin: 0 }}>Invoices</h3>
       <button
         type="button"
-        onClick={() => setInvoices([])}
+        onClick={() => {
+  setInvoices([])
+  localStorage.setItem(INVOICE_KEY, JSON.stringify([]))
+  setStatus("All invoices cleared.")
+}}
         style={{ fontSize: 12 }}
       >
         Clear all
@@ -2405,10 +2635,60 @@ const sub =
         >
           <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
             <div>
-              <div style={{ fontWeight: 700 }}>{inv.invoiceNo}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+  <div style={{ fontWeight: 700 }}>{inv.invoiceNo}</div>
+
+  {computeLiveInvoiceStatus(inv) === "paid" && (
+  <span
+    style={{
+      fontSize: 11,
+      fontWeight: 800,
+      padding: "3px 8px",
+      borderRadius: 999,
+      background: "#ecfdf5",
+      border: "1px solid #a7f3d0",
+      color: "#065f46",
+    }}
+  >
+    PAID
+  </span>
+)}
+</div>
+              <div style={{ marginTop: 6 }}>
+  <span
+    style={{
+      display: "inline-block",
+      padding: "3px 8px",
+      borderRadius: 999,
+      fontSize: 11,
+      fontWeight: 800,
+      border: "1px solid #e5e7eb",
+      background:
+        computeLiveInvoiceStatus(inv) === "paid"
+          ? "#ecfdf5"
+          : computeLiveInvoiceStatus(inv) === "overdue"
+          ? "#fff5f5"
+          : "#f3f4f6",
+      color:
+        computeLiveInvoiceStatus(inv) === "paid"
+          ? "#065f46"
+          : computeLiveInvoiceStatus(inv) === "overdue"
+          ? "#9b1c1c"
+          : "#111827",
+    }}
+  >
+    {computeLiveInvoiceStatus(inv).toUpperCase()}
+  </span>
+</div>
               <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>
-                {inv.billToName} • Due {new Date(inv.dueDate).toLocaleDateString()}
-              </div>
+  {inv.billToName} • Due {new Date(inv.dueDate).toLocaleDateString()}
+</div>
+
+{computeLiveInvoiceStatus(inv) === "paid" && inv.paidAt && (
+  <div style={{ fontSize: 12, color: "#065f46", marginTop: 4 }}>
+    Paid on {new Date(inv.paidAt).toLocaleDateString()}
+  </div>
+)}
               <div style={{ fontSize: 12, color: "#333", marginTop: 6 }}>
                 Total Due: <strong>${Number(inv.total || 0).toLocaleString()}</strong>
               </div>
@@ -2420,9 +2700,30 @@ const sub =
               </button>
 
               <button
+  type="button"
+  onClick={() => {
+    const live = computeLiveInvoiceStatus(inv)
+    if (live === "paid") {
+      updateInvoice(inv.id, { status: "sent", paidAt: undefined })
+      setStatus(`Marked unpaid: ${inv.invoiceNo}`)
+    } else {
+      updateInvoice(inv.id, { status: "paid", paidAt: Date.now() })
+      setStatus(`Marked paid: ${inv.invoiceNo}`)
+    }
+  }}
+  style={{ fontSize: 12 }}
+>
+  {computeLiveInvoiceStatus(inv) === "paid" ? "Mark Unpaid" : "Mark Paid"}
+</button>
+
+              <button
                 type="button"
                 onClick={() =>
-                  setInvoices((prev) => prev.filter((x) => x.id !== inv.id))
+                  setInvoices((prev) => {
+  const next = prev.filter((x) => x.id !== inv.id)
+  localStorage.setItem(INVOICE_KEY, JSON.stringify(next))
+  return next
+})
                 }
                 style={{ fontSize: 12 }}
               >
@@ -2623,6 +2924,302 @@ const sub =
     Generating professional document…
   </p>
 )}
+
+{/* -------------------------
+    Jobs Dashboard
+------------------------- */}
+<div
+  style={{
+    marginTop: 14,
+    marginBottom: 16,
+    padding: 12,
+    border: "1px solid #e5e7eb",
+    borderRadius: 12,
+    background: "#fff",
+  }}
+>
+  <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+    <div>
+      <h3 style={{ margin: 0 }}>Jobs</h3>
+      <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
+        Select a job to keep estimates + invoices organized.
+      </div>
+    </div>
+
+    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+      <button
+        type="button"
+        onClick={() => setActiveJobId("")}
+        style={{ fontSize: 12 }}
+      >
+        View All
+      </button>
+
+      <button
+        type="button"
+        onClick={() => {
+          const id = getOrCreateJobIdFromDetails()
+          setActiveJobId(id)
+          setStatus("Job selected.")
+        }}
+        style={{ fontSize: 12 }}
+      >
+        Create / Select from Job Details
+      </button>
+    </div>
+  </div>
+
+  <div style={{ marginTop: 10 }}>
+    <label style={{ fontSize: 12, color: "#444", fontWeight: 700 }}>
+      Active Job
+    </label>
+
+    <select
+      value={activeJobId}
+      onChange={(e) => setActiveJobId(e.target.value)}
+      style={{
+        width: "100%",
+        padding: 10,
+        marginTop: 6,
+        borderRadius: 10,
+        border: "1px solid #ddd",
+      }}
+    >
+      <option value="">All jobs</option>
+      {jobs
+        .slice()
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .map((j) => (
+          <option key={j.id} value={j.id}>
+            {(j.jobName || "Untitled Job") +
+              (j.clientName ? ` — ${j.clientName}` : "")}
+          </option>
+        ))}
+    </select>
+  </div>
+
+  {jobs.length === 0 ? (
+    <div style={{ marginTop: 10, fontSize: 12, color: "#666" }}>
+      No jobs yet. Fill out Job Details and click <strong>Create / Select from Job Details</strong>.
+    </div>
+  ) : (
+    <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
+      {jobs
+        .slice()
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .map((j) => {
+          const latest = latestEstimateForJob(j.id)
+          const latestTotal = Number(latest?.pricing?.total || 0)
+          const dep = latest?.deposit
+          const depComputed = computeDepositFromEstimateTotal(latestTotal, dep)
+
+          const invSum = invoiceSummaryForJob(j.id)
+          const latestInv = latestInvoiceForJob(j.id)
+
+          const isActive = activeJobId === j.id
+
+          return (
+            <div
+              key={j.id}
+              style={{
+                padding: 10,
+                border: "1px solid #eee",
+                borderRadius: 12,
+                background: isActive ? "#f0f9ff" : "#fafafa",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ minWidth: 240, flex: 1 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <div style={{ fontWeight: 800 }}>
+                      {j.jobName || "Untitled Job"}
+                    </div>
+                    {isActive && (
+                      <span
+                        style={{
+                          fontSize: 11,
+                          fontWeight: 800,
+                          padding: "3px 8px",
+                          borderRadius: 999,
+                          background: "#dbeafe",
+                          border: "1px solid #bfdbfe",
+                          color: "#1e3a8a",
+                        }}
+                      >
+                        Active
+                      </span>
+                    )}
+                  </div>
+
+                  <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
+                    {j.clientName ? `Client: ${j.clientName}` : "Client: —"}
+                    {j.jobAddress ? ` • ${j.jobAddress}` : ""}
+                  </div>
+
+                  <div style={{ fontSize: 12, color: "#333", marginTop: 8, display: "grid", gap: 4 }}>
+                    <div>
+                      Latest Estimate: <strong>{latest ? money(latestTotal) : "—"}</strong>
+                    </div>
+
+                    {latest?.deposit?.enabled ? (
+                      <div>
+                        Deposit / Remaining:{" "}
+                        <strong>{money(depComputed.depositDue)}</strong> /{" "}
+                        <strong>{money(depComputed.remaining)}</strong>
+                      </div>
+                    ) : (
+                      <div>Deposit: <strong>—</strong></div>
+                    )}
+
+                    <div>
+                      Invoices:{" "}
+                      <strong>{invSum.total}</strong>{" "}
+                      <span style={{ fontSize: 12, color: "#666" }}>
+                        ({invSum.draftCount} draft • {invSum.paidCount} paid • {invSum.overdueCount} overdue • {invSum.openCount} open)
+                      </span>
+                    </div>
+
+                    <div style={{ color: invSum.overdueCount > 0 ? "#9b1c1c" : "#111" }}>
+                      Outstanding: <strong>{money(invSum.outstanding)}</strong>
+                      {invSum.overdueCount > 0 ? (
+                        <span style={{ fontSize: 12, color: "#9b1c1c" }}> • overdue</span>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 180 }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveJobId(j.id)
+                      setStatus("Job selected.")
+                    }}
+                  >
+                    Select Job
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setJobDetails((prev) => ({
+                        ...prev,
+                        clientName: j.clientName || prev.clientName,
+                        jobName: j.jobName || prev.jobName,
+                        jobAddress: j.jobAddress || prev.jobAddress,
+                        changeOrderNo: j.changeOrderNo || prev.changeOrderNo,
+                      }))
+                      setActiveJobId(j.id)
+                      setStatus("Job details loaded into the form.")
+                    }}
+                    style={{ fontSize: 12 }}
+                  >
+                    Load into Form
+                  </button>
+
+                  <div style={{ display: "grid", gap: 6, marginTop: 2 }}>
+                    <button
+                      type="button"
+                      onClick={() => selectJobAndJumpToInvoices(j.id)}
+                      style={{ fontSize: 12 }}
+                    >
+                      View Invoices
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => createInvoiceFromLatestEstimate(j.id)}
+                      style={{ fontSize: 12 }}
+                    >
+                      Create Invoice (Latest Estimate)
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => createBalanceInvoiceFromLatestEstimate(j.id)}
+                      disabled={!latest || !latest?.deposit?.enabled}
+                      style={{
+                        fontSize: 12,
+                        opacity: !latest || !latest?.deposit?.enabled ? 0.6 : 1,
+                        cursor: !latest || !latest?.deposit?.enabled ? "not-allowed" : "pointer",
+                      }}
+                      title={
+                        !latest
+                          ? "No estimate found yet."
+                          : !latest?.deposit?.enabled
+                          ? "Deposit is not enabled on the latest estimate."
+                          : "Create an invoice for the remaining balance after deposit."
+                      }
+                    >
+                      Create Balance Invoice
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!latestInv) {
+                          setStatus("No invoices found for this job yet.")
+                          return
+                        }
+                        downloadInvoicePDF(latestInv)
+                        setStatus("Downloading latest invoice PDF.")
+                      }}
+                      disabled={!latestInv}
+                      style={{
+                        fontSize: 12,
+                        opacity: latestInv ? 1 : 0.6,
+                        cursor: latestInv ? "pointer" : "not-allowed",
+                      }}
+                    >
+                      Download Latest Invoice PDF
+                    </button>
+                  </div>
+
+                  <details style={{ marginTop: 2 }}>
+                    <summary style={{ cursor: "pointer", fontSize: 12 }}>
+                      Edit job
+                    </summary>
+
+                    <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                      <input
+                        placeholder="Client name"
+                        value={j.clientName || ""}
+                        onChange={(e) => updateJob(j.id, { clientName: e.target.value })}
+                        style={{ width: "100%", padding: 8 }}
+                      />
+                      <input
+                        placeholder="Job name"
+                        value={j.jobName || ""}
+                        onChange={(e) => updateJob(j.id, { jobName: e.target.value })}
+                        style={{ width: "100%", padding: 8 }}
+                      />
+                      <input
+                        placeholder="Job address"
+                        value={j.jobAddress || ""}
+                        onChange={(e) => updateJob(j.id, { jobAddress: e.target.value })}
+                        style={{ width: "100%", padding: 8 }}
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          deleteJob(j.id)
+                          setStatus("Job deleted.")
+                        }}
+                        style={{ fontSize: 12 }}
+                      >
+                        Delete Job (and linked estimates/invoices)
+                      </button>
+                    </div>
+                  </details>
+                </div>
+              </div>
+            </div>
+          )
+        })}
+    </div>
+  )}
+</div>
 
 {/* -------------------------
     Saved History
