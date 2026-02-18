@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import OpenAI from "openai"
 import { createClient } from "@supabase/supabase-js"
+import crypto from "crypto"
 
 import {
   GenerateSchema,
@@ -2401,6 +2402,11 @@ try {
   return jsonError(400, "BAD_JSON", "Invalid JSON body.")
 }
 
+const requestId =
+  req.headers.get("x-idempotency-key") ||
+  raw?.requestId ||
+  crypto.randomUUID()
+
   const inputParsed = GenerateSchema.safeParse(raw)
 if (!inputParsed.success) {
   return jsonError(400, "BAD_INPUT", "Invalid request fields.")
@@ -2481,6 +2487,7 @@ const { data: consumeRows, error: consumeErr } = await supabase.rpc(
   {
     p_email: normalizedEmail,
     p_free_limit: FREE_LIMIT,
+    p_request_id: requestId,
   }
 )
 

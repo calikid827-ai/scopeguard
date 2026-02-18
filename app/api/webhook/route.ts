@@ -30,6 +30,28 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Invalid signature" }, { status: 400 })
   }
 
+  // -----------------------------
+// Idempotency / dedupe (Stripe may retry same event)
+// -----------------------------
+const { error: dedupeErr } = await supabase
+  .from("stripe_webhook_events")
+  .insert({ event_id: event.id, type: event.type })
+
+// If event_id already exists, we've processed it — exit successfully
+if (dedupeErr) {
+  const msg = (dedupeErr as any)?.message || ""
+  const code = (dedupeErr as any)?.code || ""
+
+  // Postgres unique violation (duplicate primary key)
+  // Supabase often uses code "23505" for unique violation
+  if (code === "23505" || /duplicate key|unique/i.test(msg)) {
+    return NextResponse.json({ received: true })
+  }
+
+  // Otherwise, fail so Stripe retries (safe)
+  return NextResponse.json({ error: "Webhook dedupe write failed" }, { status: 500 })
+}
+
   // Only handle what you need (keeps webhook fast + safe)
   if (event.type !== "checkout.session.completed") {
     return NextResponse.json({ received: true })
