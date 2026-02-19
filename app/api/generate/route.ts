@@ -246,6 +246,52 @@ type PricingAnchor = {
 // HELPERS
 // -----------------------------
 
+async function tryGetCachedResult(args: { email: string; requestId: string }) {
+  const { data, error } = await supabase
+    .from("generation_results")
+    .select("response")
+    .eq("email", args.email)
+    .eq("request_id", args.requestId)
+    .maybeSingle()
+
+  if (error) {
+    console.warn("generation_results read failed:", error)
+    return null
+  }
+
+  return (data?.response ?? null) as any | null
+}
+
+async function tryStoreCachedResult(args: { email: string; requestId: string; response: any }) {
+  // Best-effort: never fail the request if caching fails
+  const { error } = await supabase
+    .from("generation_results")
+    .insert({
+      email: args.email,
+      request_id: args.requestId,
+      response: args.response,
+    })
+
+  if (error) {
+    // If it already exists (duplicate key), ignore
+    // Supabase/PostgREST typically returns 409 or a PG error code; we just ignore all insert errors here.
+    console.warn("generation_results insert failed (ignored):", error)
+  }
+}
+
+async function respondAndCache(args: {
+  email: string
+  requestId: string
+  payload: any
+}) {
+  await tryStoreCachedResult({
+    email: args.email,
+    requestId: args.requestId,
+    response: args.payload,
+  })
+  return NextResponse.json(args.payload)
+}
+
 function enforcePhaseVisitCrewDaysFloor(args: {
   pricing: Pricing
   basis: EstimateBasis | null
@@ -2417,6 +2463,16 @@ const body = inputParsed.data
 
   const normalizedEmail = body.email.trim().toLowerCase()
 
+  // -----------------------------
+// IDEMPOTENCY REPLAY (FULL RESPONSE)
+// -----------------------------
+if (requestId && normalizedEmail) {
+  const cached = await tryGetCachedResult({ email: normalizedEmail, requestId })
+  if (cached) {
+    return NextResponse.json(cached)
+  }
+}
+
   const ip =
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     req.headers.get("x-real-ip") ||
@@ -3346,89 +3402,86 @@ const deterministicOwned =
   // -----------------------------
   // CROSS-TRADE MOBILIZATION COMPRESSION (pre-permit)
   // -----------------------------
-  {
-    const ctm = compressCrossTradeMobilization({
-      pricing: pricingFinal,
-      basis: (normalized.estimateBasis ?? null) as EstimateBasis | null,
-      cp: complexityProfile,
-      tradeStack,
-      scopeText: scopeChange,
-      pricingSource,
-      detSource,
-    })
+  if (deterministicOwned) {
+  const ctm = compressCrossTradeMobilization({
+    pricing: pricingFinal,
+    basis: (normalized.estimateBasis ?? null) as EstimateBasis | null,
+    cp: complexityProfile,
+    tradeStack,
+    scopeText: scopeChange,
+    pricingSource,
+    detSource,
+  })
 
-    if (ctm.applied) {
-      pricingFinal = ctm.pricing
-      normalized.pricing = pricingFinal
-      normalized.estimateBasis = ctm.basis
-      console.log("PG XTRADE COMPRESS (det)", ctm.note)
-    }
+  if (ctm.applied) {
+    pricingFinal = ctm.pricing
+    normalized.pricing = pricingFinal
+    normalized.estimateBasis = ctm.basis
+    console.log("PG XTRADE COMPRESS (det)", ctm.note)
   }
+}
 
 if (deterministicOwned) {
   const permitPatch1 = applyPermitBuffer({
-  pricing: clampPricing(pricingFinal),
-  trade,
-  cp: complexityProfile,
-  pricingSource,
-  priceGuardVerified,
-  detSource,
-})
+    pricing: clampPricing(pricingFinal),
+    trade,
+    cp: complexityProfile,
+    pricingSource,
+    priceGuardVerified,
+    detSource,
+  })
 
-pricingFinal = permitPatch1.pricing
-const safePricing = clampPricing(pricingFinal)
+  pricingFinal = permitPatch1.pricing
+  const safePricing = clampPricing(pricingFinal)
 
   const priceGuardProtected = true
 
   normalized.trade = trade
 
   // --- Description sync when deterministic owns pricing (prevents wrong narrative) ---
-if (trade === "electrical" && electricalDet?.jobType) {
-  if (electricalDet.jobType === "device_work") {
-    normalized.description = normalized.description.replace(
-      /^This (Change Order|Estimate|Change Order \/ Estimate)\b/,
-      `This ${normalized.documentType}`
-    )
-    // Add a short scope-lock sentence if missing
-    if (!/outlet|switch|recessed|fixture/i.test(normalized.description)) {
-      normalized.description += " Work covers device-level electrical installation/replacement as described, including protection, testing, and cleanup."
+  if (trade === "electrical" && electricalDet?.jobType) {
+    if (electricalDet.jobType === "device_work") {
+      normalized.description = normalized.description.replace(
+        /^This (Change Order|Estimate|Change Order \/ Estimate)\b/,
+        `This ${normalized.documentType}`
+      )
+      if (!/outlet|switch|recessed|fixture/i.test(normalized.description)) {
+        normalized.description +=
+          " Work covers device-level electrical installation/replacement as described, including protection, testing, and cleanup."
+      }
+    }
+    if (electricalDet.jobType === "panel_replacement" && !/panel/i.test(normalized.description)) {
+      normalized.description +=
+        " Scope includes electrical panel replacement activities as described, including labeling, changeover coordination, testing, and cleanup."
     }
   }
-  if (electricalDet.jobType === "panel_replacement" && !/panel/i.test(normalized.description)) {
-    normalized.description += " Scope includes electrical panel replacement activities as described, including labeling, changeover coordination, testing, and cleanup."
+
+  if (trade === "plumbing" && plumbingDet?.jobType) {
+    if (plumbingDet.jobType === "fixture_swaps" && !/toilet|faucet|sink|vanity|valve/i.test(normalized.description)) {
+      normalized.description +=
+        " Scope covers fixture-level plumbing work as described, including isolation, removal/install, test, and cleanup."
+    }
   }
-}
 
-if (trade === "plumbing" && plumbingDet?.jobType) {
-  if (plumbingDet.jobType === "fixture_swaps" && !/toilet|faucet|sink|vanity|valve/i.test(normalized.description)) {
-    normalized.description += " Scope covers fixture-level plumbing work as described, including isolation, removal/install, test, and cleanup."
+  if (trade === "drywall" && drywallDet?.jobType) {
+    if (drywallDet.jobType === "patch_repair" && !/patch|repair/i.test(normalized.description)) {
+      normalized.description +=
+        " Work includes drywall patch/repair steps as described, including prep, finish work, and site cleanup."
+    }
   }
-}
 
-if (trade === "drywall" && drywallDet?.jobType) {
-  if (drywallDet.jobType === "patch_repair" && !/patch|repair/i.test(normalized.description)) {
-    normalized.description += " Work includes drywall patch/repair steps as described, including prep, finish work, and site cleanup."
-  }
-}
+  normalized.description = appendExecutionPlanSentence({
+    description: normalized.description,
+    documentType: normalized.documentType,
+    trade,
+    cp: complexityProfile,
+    basis: (normalized.estimateBasis ?? null) as EstimateBasis | null,
+    scopeText: scopeChange,
+  })
 
-normalized.description = appendExecutionPlanSentence({
-  description: normalized.description,
-  documentType: normalized.documentType,
-  trade,
-  cp: complexityProfile,
-  basis: (normalized.estimateBasis ?? null) as EstimateBasis | null,
-  scopeText: scopeChange,
-})
+  normalized.description = appendTradeCoordinationSentence(normalized.description, tradeStack)
 
-normalized.description = appendTradeCoordinationSentence(
-  normalized.description,
-  tradeStack
-)
-
-normalized.description = appendPermitCoordinationSentence(
-  normalized.description,
-  complexityProfile
-)
+  normalized.description = appendPermitCoordinationSentence(normalized.description, complexityProfile)
 
   const pg = buildPriceGuardReport({
     pricingSource,
@@ -3444,7 +3497,8 @@ normalized.description = appendPermitCoordinationSentence(
     usedNationalBaseline,
   })
 
-  return NextResponse.json({
+  // ✅ BUILD PAYLOAD ONCE
+  const payload = {
     documentType: normalized.documentType,
     trade: normalized.trade || trade,
     text: normalized.description,
@@ -3496,6 +3550,13 @@ normalized.description = appendPermitCoordinationSentence(
           notes: drywallDet.notes,
         }
       : null,
+  }
+
+  // ✅ CACHE + RETURN
+  return await respondAndCache({
+    email: normalizedEmail,
+    requestId,
+    payload,
   })
 }
 
@@ -3726,13 +3787,13 @@ normalized.description = await polishDescriptionWith4o({
   trade,
 })
 
-return NextResponse.json({
+const payload = {
   documentType: normalized.documentType,
   trade: normalized.trade || trade,
   text: normalized.description,
   pricing: safePricing,
 
-  pricingSource, // "ai" | "deterministic" | "merged"
+  pricingSource,
   detSource,
   priceGuardAnchor: anchorHit?.id ?? null,
   priceGuardVerified,
@@ -3749,7 +3810,7 @@ return NextResponse.json({
       }
     : null,
 
-   electrical: electricalDet
+  electrical: electricalDet
     ? {
         okForDeterministic: electricalDet.okForDeterministic,
         okForVerified: electricalDet.okForVerified,
@@ -3759,25 +3820,31 @@ return NextResponse.json({
       }
     : null,
 
-    plumbing: plumbingDet
-  ? {
-      okForDeterministic: plumbingDet.okForDeterministic,
-      okForVerified: plumbingDet.okForVerified,
-      jobType: plumbingDet.jobType,
-      signals: plumbingDet.signals ?? null,
-      notes: plumbingDet.notes,
-    }
-  : null,
+  plumbing: plumbingDet
+    ? {
+        okForDeterministic: plumbingDet.okForDeterministic,
+        okForVerified: plumbingDet.okForVerified,
+        jobType: plumbingDet.jobType,
+        signals: plumbingDet.signals ?? null,
+        notes: plumbingDet.notes,
+      }
+    : null,
 
   drywall: drywallDet
-  ? {
-      okForDeterministic: drywallDet.okForDeterministic,
-      okForVerified: drywallDet.okForVerified,
-      jobType: drywallDet.jobType,
-      signals: drywallDet.signals ?? null,
-      notes: drywallDet.notes,
-    }
-  : null,
+    ? {
+        okForDeterministic: drywallDet.okForDeterministic,
+        okForVerified: drywallDet.okForVerified,
+        jobType: drywallDet.jobType,
+        signals: drywallDet.signals ?? null,
+        notes: drywallDet.notes,
+      }
+    : null,
+}
+
+return await respondAndCache({
+  email: normalizedEmail,
+  requestId,
+  payload,
 })
 
   } catch (err) {
