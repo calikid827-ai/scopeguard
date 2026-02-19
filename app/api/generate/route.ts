@@ -53,12 +53,19 @@ const supabase = createClient(
 // CONSTANTS
 // -----------------------------
 const FREE_LIMIT = 3
+const DEV_ALWAYS_PAID = [
+  "test12345@gmail.com"
+]
 const PRIMARY_MODEL = "gpt-4.1-mini" as const
 const DESCRIPTION_POLISH_MODEL = "gpt-4o" as const
 
 // -----------------------------
 // TYPES
 // -----------------------------
+type WorkSchedule = {
+  workDaysPerWeek: 5 | 6 | 7
+}
+
 type Pricing = {
   labor: number
   materials: number
@@ -246,6 +253,10 @@ type PricingAnchor = {
 // HELPERS
 // -----------------------------
 
+function wantsDebug(req: NextRequest) {
+  return req.headers.get("x-debug") === "1"
+}
+
 async function tryGetCachedResult(args: { email: string; requestId: string }) {
   const { data, error } = await supabase
     .from("generation_results")
@@ -283,13 +294,27 @@ async function respondAndCache(args: {
   email: string
   requestId: string
   payload: any
+  status?: number
+  cache?: boolean
 }) {
-  await tryStoreCachedResult({
-    email: args.email,
-    requestId: args.requestId,
-    response: args.payload,
-  })
-  return NextResponse.json(args.payload)
+  const status = args.status ?? 200
+  const cache =
+    args.cache ??
+    (status >= 200 &&
+      status < 300 &&
+      args.payload &&
+      args.payload.ok !== false &&          // don’t cache {ok:false,...}
+      args.payload.code !== "FREE_LIMIT")   // extra belt+suspenders
+
+  if (cache) {
+    await tryStoreCachedResult({
+      email: args.email,
+      requestId: args.requestId,
+      response: args.payload,
+    })
+  }
+
+  return NextResponse.json(args.payload, { status })
 }
 
 function enforcePhaseVisitCrewDaysFloor(args: {
@@ -519,6 +544,195 @@ function isValidEstimateBasis(b: any): b is EstimateBasis {
   if (!Number.isFinite(Number(b.mobilization)) || Number(b.mobilization) < 0) return false
   if (!Array.isArray(b.assumptions)) return false
   return true
+}
+
+function normalizeEstimateBasisUnits(basis: EstimateBasis): EstimateBasis {
+  // Prefer days if present (project-based)
+  if (basis.units.includes("days")) {
+    const cd = Number(basis.crewDays ?? basis.quantities?.days ?? 0)
+    const crewDays = Number.isFinite(cd) && cd > 0 ? cd : 1
+    return {
+      ...basis,
+      units: ["days"],
+      crewDays,
+      quantities: { ...(basis.quantities || {}), days: crewDays },
+      hoursPerUnit: 0,
+    }
+  }
+
+  // Prefer explicit count units over lump_sum
+  const preferred: PricingUnit[] = [
+    "sqft",
+    "linear_ft",
+    "rooms",
+    "doors",
+    "fixtures",
+    "devices",
+  ]
+
+  for (const u of preferred) {
+    const q = Number(basis.quantities?.[u] ?? 0)
+    if (basis.units.includes(u) && Number.isFinite(q) && q > 0) {
+      return {
+        ...basis,
+        units: [u],
+        crewDays: undefined,
+      }
+    }
+  }
+
+  // Otherwise force lump_sum
+  return {
+    ...basis,
+    units: ["lump_sum"],
+    quantities: { ...(basis.quantities || {}), lump_sum: 1 },
+    crewDays: undefined,
+  }
+}
+
+function normalizeBasisSafe(basis: any): any {
+  return basis && isValidEstimateBasis(basis)
+    ? normalizeEstimateBasisUnits(basis)
+    : basis
+}
+
+function pickLaborRateByTrade(trade: string): number {
+  const t = (trade || "").toLowerCase()
+  if (t === "electrical") return 115
+  if (t === "plumbing") return 125
+  if (t === "tile" || t === "flooring") return 95
+  if (t === "painting") return 75
+  if (t === "drywall") return 70
+  if (t === "carpentry") return 90
+  return 95 // general renovation default
+}
+
+function defaultMobilizationByComplexity(cp: ComplexityProfile | null): number {
+  if (!cp) return 250
+  return Math.max(0, Number(cp.minMobilization ?? 0))
+}
+
+function buildEstimateBasisFallback(args: {
+  trade: string
+  pricing: Pricing
+  parsed: { rooms: number | null; doors: number | null; sqft: number | null }
+  complexity: ComplexityProfile | null
+}): EstimateBasis {
+  const trade = (args.trade || "").toLowerCase()
+  const cp = args.complexity
+  const p = coercePricing(args.pricing)
+
+  const laborRate = pickLaborRateByTrade(trade)
+
+  // Decide primary unit:
+  // 1) If complexity demands days → days
+  // 2) Else prefer explicit qty: sqft > doors > rooms
+  // 3) Else fallback → lump_sum
+  let unit: PricingUnit = "lump_sum"
+  if (cp?.requireDaysBasis) unit = "days"
+  else if (args.parsed.sqft && args.parsed.sqft > 0) unit = "sqft"
+  else if (args.parsed.doors && args.parsed.doors > 0) unit = "doors"
+  else if (args.parsed.rooms && args.parsed.rooms > 0) unit = "rooms"
+  else unit = "lump_sum"
+
+  const quantities: Partial<Record<PricingUnit, number>> = {}
+  if (args.parsed.sqft && args.parsed.sqft > 0) quantities.sqft = args.parsed.sqft
+  if (args.parsed.doors && args.parsed.doors > 0) quantities.doors = args.parsed.doors
+  if (args.parsed.rooms && args.parsed.rooms > 0) quantities.rooms = args.parsed.rooms
+
+  // If we're forced into "days", ensure days exists.
+  // Otherwise if unit is lump_sum, store as 1.
+  if (unit === "days") {
+    const impliedLaborHours = Math.max(1, Number(p.labor || 0) / laborRate)
+    const crewSize = Math.max(1, Number(cp?.crewSizeMin ?? 1))
+    const hrsPerDay = Math.max(5.5, Math.min(8, Number(cp?.hoursPerDayEffective ?? 7)))
+    const impliedCrewDays = impliedLaborHours / (crewSize * hrsPerDay)
+
+    const minCD = Number(cp?.minCrewDays ?? 0.5)
+    const maxCD = Number(cp?.maxCrewDays ?? 25)
+    const crewDays = Math.max(minCD, Math.min(maxCD, Math.round(impliedCrewDays * 2) / 2))
+
+    quantities.days = crewDays
+  } else if (unit === "lump_sum") {
+    quantities.lump_sum = 1
+  } else {
+    // unit is sqft/doors/rooms but might be missing quantity (if parsing was null)
+    const q = Number(quantities[unit] ?? 0)
+    if (!Number.isFinite(q) || q <= 0) {
+      // if we can't trust quantity, fallback to lump_sum=1
+      unit = "lump_sum"
+      quantities.lump_sum = 1
+    }
+  }
+
+  // Derive hoursPerUnit from labor dollars when meaningful
+  const impliedLaborHours = Math.max(1, Number(p.labor || 0) / laborRate)
+
+  let hoursPerUnit = 0
+  if (unit === "days") {
+    // hoursPerUnit doesn't apply well to days; keep 0 and let crewDays speak
+    hoursPerUnit = 0
+  } else {
+    const q = Number(quantities[unit] ?? 1)
+    hoursPerUnit = q > 0 ? Math.round((impliedLaborHours / q) * 1000) / 1000 : 0
+  }
+
+  const mobilization = Math.max(
+    defaultMobilizationByComplexity(cp),
+    Number.isFinite(Number(p.subs)) ? Math.min(Math.round(Number(p.subs)), Math.max(150, defaultMobilizationByComplexity(cp))) : defaultMobilizationByComplexity(cp)
+  )
+
+  const assumptions: string[] = []
+  assumptions.push("Estimate basis auto-generated to enforce consistent pricing math.")
+  if (unit === "lump_sum") assumptions.push("Scope lacked explicit quantities; priced as lump sum under mid-market assumptions.")
+  if (unit !== "days" && cp?.requireDaysBasis) assumptions.push("Complexity required days basis; crewDays derived from labor dollars and class minimums.")
+  if (cp?.permitLikely) assumptions.push("Permit/inspection coordination may require additional scheduling/returns depending on jurisdiction.")
+
+  const out: EstimateBasis = {
+    units: [unit],
+    quantities,
+    laborRate,
+    hoursPerUnit,
+    crewDays: unit === "days" ? Number(quantities.days ?? 0) : undefined,
+    mobilization,
+    assumptions,
+  }
+
+  return out
+}
+
+function normalizePricingMath(p: Pricing): Pricing {
+  const labor = Math.round(Number(p?.labor ?? 0))
+  const materials = Math.round(Number(p?.materials ?? 0))
+  const subs = Math.round(Number(p?.subs ?? 0))
+
+  // if markup comes as 0.2 meaning 20%, fix it
+  let markup = Number(p?.markup ?? 20)
+  if (markup > 0 && markup <= 1) markup = markup * 100
+  markup = Math.min(25, Math.max(15, Math.round(markup)))
+
+  const base = labor + materials + subs
+  const total = Math.round(base * (1 + markup / 100))
+
+  return clampPricing({ labor, materials, subs, markup, total })
+}
+
+function enforceEstimateBasis(args: {
+  trade: string
+  pricing: Pricing
+  basis: any
+  parsed: { rooms: number | null; doors: number | null; sqft: number | null }
+  complexity: ComplexityProfile | null
+}): EstimateBasis {
+  const b = args.basis
+  if (isValidEstimateBasis(b)) return b
+
+  return buildEstimateBasisFallback({
+    trade: args.trade,
+    pricing: args.pricing,
+    parsed: args.parsed,
+    complexity: args.complexity,
+  })
 }
 
 function approxEqual(a: number, b: number, pct = 0.08) {
@@ -1158,6 +1372,107 @@ function appendTradeCoordinationSentence(desc: string, stack: TradeStack): strin
   return (d + ` The scope includes coordination across ${list.join(", ")} activities${phaseHint} to maintain sequencing with existing conditions.`).trim()
 }
 
+function estimateCalendarDaysRange(args: {
+  crewDays: number
+  cp: ComplexityProfile | null
+  trade: string
+  tradeStack: TradeStack | null
+  scopeText: string
+  workDaysPerWeek: 5 | 6 | 7
+}): { minDays: number; maxDays: number; rationale: string[] } {
+  const crewDays = Math.max(0.5, Number(args.crewDays || 0))
+  const cp = args.cp
+  const trade = (args.trade || "").toLowerCase()
+  const s = (args.scopeText || "").toLowerCase()
+  const stack = args.tradeStack
+  const workDaysPerWeek = args.workDaysPerWeek
+
+  const rationale: string[] = []
+
+  // --- Start in WORKDAYS (not elapsed days yet) ---
+  let minWorkdays = Math.ceil(crewDays)
+  let maxWorkdays = Math.ceil(crewDays * 1.35)
+
+  const { visits, phases } = inferPhaseVisitsFromSignals({ scopeText: args.scopeText, cp })
+
+  if (visits >= 2) { maxWorkdays += 1; rationale.push("multi-visit sequencing") }
+  if (visits >= 3) { maxWorkdays += 1; rationale.push("multiple return trips") }
+
+  const wetArea =
+    /\b(shower|tub|pan|curb|waterproof|membrane|red\s*guard|thinset|grout|mud\s*bed)\b/.test(s)
+  if (wetArea) {
+    minWorkdays += 1
+    maxWorkdays += 3
+    rationale.push("wet-area cure/set time")
+  }
+
+  const drywallSignals =
+    /\b(drywall|sheetrock|tape|mud|mudding|texture|skim\s*coat|orange\s*peel|knockdown)\b/.test(s)
+  if (drywallSignals) {
+    minWorkdays += 1
+    maxWorkdays += 2
+    rationale.push("drywall dry/return")
+  }
+
+  const paintSignals = /\b(paint|painting|prime|primer|2\s*coats|two\s*coats|coat)\b/.test(s)
+  if (trade === "painting" && paintSignals) {
+    maxWorkdays += 1
+    rationale.push("coat/dry time")
+  }
+
+  const flooringSignals = /\b(lvp|vinyl\s*plank|laminate|hardwood|engineered\s*wood)\b/.test(s)
+  if (flooringSignals) {
+    maxWorkdays += 1
+    rationale.push("flooring acclimation")
+  }
+
+  if (cp?.permitLikely) {
+    minWorkdays += 1
+    maxWorkdays += 4
+    rationale.push("permit/inspection scheduling")
+  }
+
+  if (stack?.isMultiTrade || cp?.multiTrade) {
+    maxWorkdays += 2
+    rationale.push("multi-trade coordination")
+  }
+
+  if (cp?.class === "complex") maxWorkdays += 1
+  if (cp?.class === "remodel") maxWorkdays += 2
+
+  // Guard rails (workdays)
+  minWorkdays = Math.max(1, minWorkdays)
+  maxWorkdays = Math.max(minWorkdays, maxWorkdays)
+
+  if (crewDays <= 1) {
+    minWorkdays = 1
+    maxWorkdays = Math.min(maxWorkdays, 3)
+  }
+
+  // --- Convert to ELAPSED CALENDAR DAYS using schedule ---
+  const minDays = workdaysToElapsedDays(minWorkdays, workDaysPerWeek)
+  const maxDays = workdaysToElapsedDays(maxWorkdays, workDaysPerWeek)
+
+  return { minDays, maxDays: Math.max(minDays, maxDays), rationale }
+}
+
+function clampWorkDaysPerWeek(n: any): 5 | 6 | 7 {
+  return n === 6 ? 6 : n === 7 ? 7 : 5
+}
+
+function workdaysToElapsedDays(workdays: number, workDaysPerWeek: 5 | 6 | 7): number {
+  const wd = Math.max(1, Math.round(workdays))
+  const w = workDaysPerWeek
+
+  if (w === 7) return wd
+
+  // Number of calendar weeks touched by wd workdays
+  const weeksTouched = Math.ceil(wd / w)
+  const offDaysPerWeek = 7 - w
+
+  return wd + (weeksTouched - 1) * offDaysPerWeek
+}
+
 function appendExecutionPlanSentence(args: {
   description: string
   documentType: string
@@ -1165,40 +1480,46 @@ function appendExecutionPlanSentence(args: {
   cp: ComplexityProfile | null
   basis: EstimateBasis | null
   scopeText: string
+  tradeStack?: TradeStack | null
+  workDaysPerWeek?: 5 | 6 | 7
 }): string {
   let d = (args.description || "").trim()
   if (!d) return d
-
-  // Avoid adding repeatedly if the route calls twice
   if (/\bEstimated duration:\b/i.test(d)) return d
 
   const cp = args.cp
   const b = args.basis
   const { visits, phases } = inferPhaseVisitsFromSignals({ scopeText: args.scopeText, cp })
 
-  // If we have days, state them. Otherwise skip duration sentence.
   const hasDays = !!(b && Array.isArray(b.units) && b.units.includes("days"))
   const cd = Number(b?.crewDays ?? b?.quantities?.days ?? 0)
-
-  // Only add when it’s meaningful
   if (!hasDays || !Number.isFinite(cd) || cd <= 0) return d
 
-  // Round to nearest 0.5 for readability
   const rounded = Math.round(cd * 2) / 2
   const dayWord = rounded === 1 ? "day" : "days"
 
+  const visitText = visits >= 2 ? ` across approximately ${visits} site visit(s)` : ""
   const phaseText =
-    phases.length > 0
-      ? ` with sequencing for ${phases.slice(0, 3).join(", ")}`
-      : ""
+    phases.length > 0 ? ` with sequencing for ${phases.slice(0, 3).join(", ")}` : ""
 
-  const visitText =
-    visits >= 2 ? ` across approximately ${visits} site visit(s)` : ""
+ const cal = estimateCalendarDaysRange({
+  crewDays: rounded,
+  cp,
+  trade: args.trade,
+  tradeStack: args.tradeStack ?? null,
+  scopeText: args.scopeText,
+  workDaysPerWeek: args.workDaysPerWeek ?? 5,
+})
 
-  // Keep it contract-friendly, not “guarantee-y”
-  const sentence = ` Estimated duration: approximately ${rounded} crew-${dayWord}${visitText}${phaseText}.`
+const sched = args.workDaysPerWeek ?? 5
+const scheduleText = sched === 5 ? " (5-day workweek)" : sched === 6 ? " (6-day workweek)" : " (7-day workweek)"
+const calText =
+  cal.minDays === cal.maxDays
+    ? `${cal.minDays} calendar day(s)`
+    : `${cal.minDays}–${cal.maxDays} calendar day(s)`
 
-  // Ensure description still begins correctly (your prompt wants “This Estimate…”)
+const sentence =
+  ` Estimated duration: approximately ${rounded} crew-${dayWord}${visitText} (typically ${calText}${scheduleText})${phaseText}.`
   d = d.replace(
     /^This (Change Order|Estimate|Change Order \/ Estimate)\b/,
     `This ${args.documentType}`
@@ -2448,17 +2769,35 @@ try {
   return jsonError(400, "BAD_JSON", "Invalid JSON body.")
 }
 
-const requestId =
-  req.headers.get("x-idempotency-key") ||
-  raw?.requestId ||
-  crypto.randomUUID()
+const headerKey = req.headers.get("x-idempotency-key")?.trim()
+const bodyKey =
+  typeof raw?.requestId === "string"
+    ? raw.requestId.trim()
+    : ""
+
+const requestId = headerKey || bodyKey || crypto.randomUUID()
+
+// Only cache if client actually provided an idempotency key
+const cacheEligible = !!(headerKey || bodyKey)
 
   const inputParsed = GenerateSchema.safeParse(raw)
 if (!inputParsed.success) {
-  return jsonError(400, "BAD_INPUT", "Invalid request fields.")
+  console.log("BAD_INPUT issues:", inputParsed.error.issues)
+  return NextResponse.json(
+    {
+      ok: false,
+      code: "BAD_INPUT",
+      message: "Invalid request fields.",
+      issues: inputParsed.error.issues,
+    },
+    { status: 400 }
+  )
 }
 
 const body = inputParsed.data
+
+const workDaysPerWeek = clampWorkDaysPerWeek(body.workDaysPerWeek)
+
   body.scopeChange = cleanScopeText(body.scopeChange)
 
   const normalizedEmail = body.email.trim().toLowerCase()
@@ -2466,11 +2805,9 @@ const body = inputParsed.data
   // -----------------------------
 // IDEMPOTENCY REPLAY (FULL RESPONSE)
 // -----------------------------
-if (requestId && normalizedEmail) {
+if (cacheEligible && requestId && normalizedEmail) {
   const cached = await tryGetCachedResult({ email: normalizedEmail, requestId })
-  if (cached) {
-    return NextResponse.json(cached)
-  }
+  if (cached) return NextResponse.json(cached)
 }
 
   const ip =
@@ -2530,45 +2867,62 @@ const paintScope: PaintScope | null =
       : uiTradeRaw
     const rawState = typeof body.state === "string" ? body.state.trim() : ""
 
-    // -----------------------------
-// ATOMIC FREE LIMIT ENFORCEMENT (DB-LOCKED)
+ // -----------------------------
+// ENTITLEMENTS / FREE LIMIT
 // -----------------------------
-// This function:
-// - creates the row if missing
-// - locks the row (FOR UPDATE) to prevent races
-// - increments usage_count ONLY for free users
-// - never increments for paid users
-const { data: consumeRows, error: consumeErr } = await supabase.rpc(
-  "consume_free_generation",
-  {
+let usage_count = 0
+let free_limit = FREE_LIMIT
+
+// ✅ Dev bypass: do NOT consume free generations for dev/test emails
+if (!DEV_ALWAYS_PAID.includes(normalizedEmail)) {
+  const { data, error } = await supabase.rpc("consume_free_generation", {
     p_email: normalizedEmail,
     p_free_limit: FREE_LIMIT,
-    p_request_id: requestId,
+    p_idempotency_key: requestId,
+  })
+
+  if (error) {
+    console.error("consume_free_generation error:", error)
+    return NextResponse.json({ error: "Entitlement check failed" }, { status: 500 })
   }
-)
 
-// Supabase RPC returns an array of rows for "returns table"
-const consume = Array.isArray(consumeRows) ? consumeRows[0] : null
+  const row =
+    Array.isArray(data) ? data[0] :
+    data && typeof data === "object" ? data :
+    null
 
-if (consumeErr || !consume) {
-  console.error("consume_free_generation failed:", consumeErr)
-  return NextResponse.json({ error: "Entitlement check failed" }, { status: 500 })
-}
+  if (!row) {
+    console.error("consume_free_generation returned empty data:", data)
+    return NextResponse.json({ error: "Entitlement check failed (empty)" }, { status: 500 })
+  }
 
-const isPaid = consume.entitled === true
-const usageCount = typeof consume.usage_count === "number" ? consume.usage_count : 0
+  const payload =
+    (row as any).consume_free_generation ??
+    (row as any).consume_free_gen ??
+    row
 
-// If not allowed, stop BEFORE any OpenAI / heavy compute
-if (!consume.allowed) {
-  return NextResponse.json(
-    {
-      error: "Free limit reached",
-      entitled: isPaid,
-      usage_count: usageCount,
-      free_limit: FREE_LIMIT,
-    },
-    { status: 403 }
-  )
+  if (!payload || typeof payload.ok !== "boolean") {
+    console.error("consume_free_generation unexpected shape:", data)
+    return NextResponse.json({ error: "Entitlement check failed (shape)" }, { status: 500 })
+  }
+
+  // NEW SHAPE: ok, reason?, usage_count?, free_limit?
+  usage_count = typeof payload.usage_count === "number" ? payload.usage_count : 0
+  free_limit = typeof payload.free_limit === "number" ? payload.free_limit : FREE_LIMIT
+
+  // ✅ Block if the function says no
+  if (!payload.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "FREE_LIMIT",
+        reason: payload.reason ?? "free_limit_reached",
+        usage_count,
+        free_limit,
+      },
+      { status: 403 }
+    )
+  }
 }
 
     // -----------------------------
@@ -2740,6 +3094,127 @@ console.log("PG ANCHOR PRICING", {
   hasAnchorPricing: !!anchorPricing,
   anchorTotal: anchorPricing?.total ?? null,
 })
+
+// -----------------------------
+// ✅ SHORT-CIRCUIT: PRICING ANCHOR OWNS (skip OpenAI)
+// This makes testing stable and avoids AI math validation noise.
+// -----------------------------
+if (
+  anchorHit?.id === "bathroom_remodel_v1" ||
+  anchorHit?.id === "kitchen_remodel_v1"
+) {
+  if (anchorPricing) {
+    const pricingFinal = normalizePricingMath(anchorPricing)
+
+    // Build a deterministic estimateBasis so schedule + debug output works
+    const parsedSqft = parseSqft(scopeChange)
+    const basis = normalizeEstimateBasisUnits(
+      buildEstimateBasisFallback({
+        trade,
+        pricing: pricingFinal,
+        parsed: { rooms, doors, sqft: parsedSqft },
+        complexity: complexityProfile,
+      })
+    )
+
+    // Create a deterministic description (then append scheduling + coordination)
+    const documentType: "Estimate" | "Change Order" | "Change Order / Estimate" =
+  /\b(change order|additional work|add(?:ition)?\b|revise|revision|extra)\b/i.test(scopeChange)
+    ? "Change Order"
+    : /\b(estimate|proposal|quote)\b/i.test(scopeChange)
+    ? "Estimate"
+    : "Change Order / Estimate"
+    let desc = defaultDeterministicDescription({
+      documentType,
+      trade,
+      scopeText: effectiveScopeChange,
+      jobType: null,
+    })
+
+    desc = appendExecutionPlanSentence({
+      description: desc,
+      documentType,
+      trade,
+      cp: complexityProfile,
+      basis,
+      scopeText: scopeChange,
+      tradeStack,
+      workDaysPerWeek,
+    })
+
+    desc = appendTradeCoordinationSentence(desc, tradeStack)
+    desc = appendPermitCoordinationSentence(desc, complexityProfile)
+
+    const pg = buildPriceGuardReport({
+      pricingSource: "deterministic",
+      priceGuardVerified: true,
+      priceGuardAnchorStrict: false,
+      stateAbbrev,
+      rooms,
+      doors,
+      measurements,
+      effectivePaintScope: null,
+      anchorId: anchorHit.id,
+      detSource: `anchor:${anchorHit.id}`,
+      usedNationalBaseline,
+    })
+
+    const payload = {
+      documentType,
+      trade,
+      text: desc,
+      pricing: pricingFinal,
+
+      ...(wantsDebug(req) ? { estimateBasis: basis } : {}),
+
+      pricingSource: "deterministic" as const,
+      detSource: `anchor:${anchorHit.id}`,
+      priceGuardAnchor: anchorHit.id,
+      priceGuardVerified: true,
+      priceGuardProtected: true,
+      priceGuard: pg,
+
+      flooring: flooringDet ? {
+        okForDeterministic: flooringDet.okForDeterministic,
+        okForVerified: flooringDet.okForVerified,
+        flooringType: flooringDet.flooringType,
+        sqft: flooringDet.sqft,
+        notes: flooringDet.notes,
+      } : null,
+
+      electrical: electricalDet ? {
+        okForDeterministic: electricalDet.okForDeterministic,
+        okForVerified: electricalDet.okForVerified,
+        jobType: electricalDet.jobType,
+        signals: electricalDet.signals ?? null,
+        notes: electricalDet.notes,
+      } : null,
+
+      plumbing: plumbingDet ? {
+        okForDeterministic: plumbingDet.okForDeterministic,
+        okForVerified: plumbingDet.okForVerified,
+        jobType: plumbingDet.jobType,
+        signals: plumbingDet.signals ?? null,
+        notes: plumbingDet.notes,
+      } : null,
+
+      drywall: drywallDet ? {
+        okForDeterministic: drywallDet.okForDeterministic,
+        okForVerified: drywallDet.okForVerified,
+        jobType: drywallDet.jobType,
+        signals: drywallDet.signals ?? null,
+        notes: drywallDet.notes,
+      } : null,
+    }
+
+    return await respondAndCache({
+  email: normalizedEmail,
+  requestId,
+  payload,
+  cache: cacheEligible,
+})
+  }
+}
 
 const useBigJobPricing =
   looksLikePainting &&
@@ -3167,11 +3642,20 @@ const normalized: any = {
   estimateBasis: aiParsed.estimateBasis ?? null,
 }
 
-// 🔒 Coerce AI pricing to numbers (prevents string math bugs)
 normalized.pricing = clampPricing(coercePricing(normalized.pricing))
 
-// --- AI unit + math validation (one-shot repair if needed) ---
-const parsedSqft = parseSqft(scopeChange) // uses your existing helper
+// ✅ EstimateBasis enforcement (AI fallback quality)
+const parsedSqft = parseSqft(scopeChange)
+normalized.estimateBasis = normalizeEstimateBasisUnits(
+  enforceEstimateBasis({
+    trade,
+    pricing: normalized.pricing,
+    basis: normalized.estimateBasis,
+    parsed: { rooms, doors, sqft: parsedSqft },
+    complexity: complexityProfile,
+  })
+)
+
 const aiBasis = (normalized.estimateBasis ?? null) as EstimateBasis | null
 
 const v = validateAiMath({
@@ -3179,7 +3663,7 @@ const v = validateAiMath({
   basis: aiBasis,
   parsedCounts: { rooms, doors, sqft: parsedSqft },
   complexity: complexityProfile,
-  scopeText: scopeChange, // ✅
+  scopeText: scopeChange,
 })
 
 if (!v.ok) {
@@ -3210,6 +3694,16 @@ Return corrected JSON using the SAME schema, and make estimateBasis match the pr
         normalized.description = repaired.description ?? normalized.description
         normalized.pricing = clampPricing(coercePricing(repaired.pricing))
         normalized.estimateBasis = repaired.estimateBasis ?? normalized.estimateBasis
+
+        normalized.estimateBasis = normalizeEstimateBasisUnits(
+  enforceEstimateBasis({
+    trade,
+    pricing: normalized.pricing,
+    basis: normalized.estimateBasis,
+    parsed: { rooms, doors, sqft: parsedSqft },
+    complexity: complexityProfile,
+  })
+)
       } catch {
         console.warn("AI repair returned invalid JSON; continuing with original output.")
       }
@@ -3250,6 +3744,8 @@ Return corrected JSON using the SAME schema, and make estimateBasis match the pr
     normalized.estimateBasis = enforced.basis
   }
 }
+
+normalized.estimateBasis = normalizeBasisSafe(normalized.estimateBasis)
 
 const v3 = validateAiMath({
   pricing: normalized.pricing,
@@ -3477,6 +3973,8 @@ if (deterministicOwned) {
     cp: complexityProfile,
     basis: (normalized.estimateBasis ?? null) as EstimateBasis | null,
     scopeText: scopeChange,
+    tradeStack,
+    workDaysPerWeek
   })
 
   normalized.description = appendTradeCoordinationSentence(normalized.description, tradeStack)
@@ -3497,12 +3995,17 @@ if (deterministicOwned) {
     usedNationalBaseline,
   })
 
+    normalized.estimateBasis = normalizeBasisSafe(normalized.estimateBasis)
+
   // ✅ BUILD PAYLOAD ONCE
   const payload = {
     documentType: normalized.documentType,
     trade: normalized.trade || trade,
     text: normalized.description,
     pricing: safePricing,
+
+    // debug-only: expose estimateBasis for terminal tests
+    ...(wantsDebug(req) ? { estimateBasis: normalized.estimateBasis ?? null } : {}),
 
     pricingSource,
     detSource,
@@ -3554,10 +4057,11 @@ if (deterministicOwned) {
 
   // ✅ CACHE + RETURN
   return await respondAndCache({
-    email: normalizedEmail,
-    requestId,
-    payload,
-  })
+  email: normalizedEmail,
+  requestId,
+  payload,
+  cache: cacheEligible,
+})
 }
 
 // IMPORTANT: Make sure your later logic respects this:
@@ -3766,6 +4270,8 @@ normalized.description = appendExecutionPlanSentence({
   cp: complexityProfile,
   basis: (normalized.estimateBasis ?? null) as EstimateBasis | null,
   scopeText: scopeChange,
+  tradeStack,
+  workDaysPerWeek,
 })
 
 normalized.description = appendTradeCoordinationSentence(
@@ -3787,11 +4293,16 @@ normalized.description = await polishDescriptionWith4o({
   trade,
 })
 
+  normalized.estimateBasis = normalizeBasisSafe(normalized.estimateBasis)
+
 const payload = {
   documentType: normalized.documentType,
   trade: normalized.trade || trade,
   text: normalized.description,
   pricing: safePricing,
+
+  // debug-only: expose estimateBasis for terminal tests
+    ...(wantsDebug(req) ? { estimateBasis: normalized.estimateBasis ?? null } : {}),
 
   pricingSource,
   detSource,
@@ -3845,6 +4356,7 @@ return await respondAndCache({
   email: normalizedEmail,
   requestId,
   payload,
+  cache: cacheEligible,
 })
 
   } catch (err) {

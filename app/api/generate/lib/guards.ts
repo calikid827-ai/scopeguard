@@ -38,11 +38,15 @@ export const GenerateSchema = z.object({
         )
         .max(50),
     })
-    .nullable()
-    .optional()
-    .default(null),
-})
+.nullable()
+.optional()
+.default(null),
 
+workDaysPerWeek: z
+  .union([z.literal(5), z.literal(6), z.literal(7)])
+  .optional()
+  .default(5),
+  })
 export function cleanScopeText(s: string) {
   return s
     .replace(/\r\n/g, "\n")
@@ -58,6 +62,7 @@ export function jsonError(status: number, code: string, message: string) {
   })
 }
 
+// Host-based Origin allowlist
 export function assertSameOrigin(req: Request) {
   const origin = req.headers.get("origin")
 
@@ -71,7 +76,7 @@ export function assertSameOrigin(req: Request) {
     return false
   }
 
-  // Primary allowed host comes from your env (you already have NEXT_PUBLIC_SITE_URL)
+  // Primary allowed host comes from env (NEXT_PUBLIC_SITE_URL)
   const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || ""
   let expectedHost = ""
   try {
@@ -90,7 +95,14 @@ export function assertSameOrigin(req: Request) {
   if (expectedHost) allowed.add(expectedHost)
   for (const h of extraHosts) allowed.add(h)
 
-  // If you didn't configure anything, fail closed in production
+  // ✅ Dev convenience: allow common localhost variants automatically
+  // (does NOT apply to production)
+  if (process.env.NODE_ENV !== "production") {
+    allowed.add("localhost:3000")
+    allowed.add("127.0.0.1:3000")
+  }
+
+  // Fail closed in production if you didn’t configure anything
   if (allowed.size === 0) return process.env.NODE_ENV !== "production"
 
   return allowed.has(o.host)
